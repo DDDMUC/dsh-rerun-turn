@@ -180,7 +180,7 @@ test('buildShadowWrites lands one turn-less user/message carrier', () => {
 test('buildReplayWrites renumbers turns, marks copies, and drops usage and streams', () => {
   const { events, seqs } = standardLog()
   const plan = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
-  const writes = P.buildReplayWrites(events, { logFrom: plan.replayFrom, logTo: plan.logTo, promptSeq: plan.promptSeq }, 7, 'rerun-1', 100, false)
+  const writes = P.buildReplayWrites(events, { logFrom: plan.replayFrom, logTo: plan.logTo, promptSeq: plan.promptSeq, shadowed: plan.shadowed }, 7, 'rerun-1', 100, false)
   const types = writes.map((write) => write.type)
   assert.equal(types[0], 'turn/start')
   assert.equal(types[1], 'step/start')
@@ -210,7 +210,13 @@ test('buildReplayWrites remaps tool result sourceEventSeqs onto the copies', () 
   const { events, seqs } = standardLog()
   // Replay turn 2 itself (the failed-admission path replays from the turn
   // start), so the tool call and its result are inside the range.
-  const plan = { logFrom: events[seqs.c.seq - 2].seq, logTo: seqs.d.seq - 1, promptSeq: seqs.c.seq }
+  const planned = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
+  const plan = {
+    logFrom: planned.logFrom,
+    logTo: planned.logTo,
+    promptSeq: planned.promptSeq,
+    shadowed: planned.shadowed,
+  }
   const writes = P.buildReplayWrites(events, plan, 7, 'rerun-1', 50, true)
   const call = writes.find((write) => write.type === 'tool/call')
   assert.ok(call, 'the call is copied')
@@ -252,7 +258,7 @@ test('rerunLedger tracks completion through copies and the rpcId prompt', () => 
 
   // Replay the tail: the copies carry the marker, and the rerun completes.
   const record = ledger.reruns[0]
-  const writes = P.buildReplayWrites(working, { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq }, 5, rerunId, working.length, false)
+  const writes = P.buildReplayWrites(working, { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed }, 5, rerunId, working.length, false)
   working = [
     ...working,
     ...writes.map((write) => ({
@@ -270,7 +276,7 @@ test('rerunLedger tracks completion through copies and the rpcId prompt', () => 
 test('matchReplayPrefix absorbs a crashed bracket prefix at the tail', () => {
   const { events, seqs } = standardLog()
   const plan = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
-  const writes = P.buildReplayWrites(events, { logFrom: plan.replayFrom, logTo: plan.logTo, promptSeq: plan.promptSeq }, 7, 'r', 100, false)
+  const writes = P.buildReplayWrites(events, { logFrom: plan.replayFrom, logTo: plan.logTo, promptSeq: plan.promptSeq, shadowed: plan.shadowed }, 7, 'r', 100, false)
   // Land the first two bracket writes at the tail of a log (as a crash in the
   // middle of the replay would leave it).
   const tail = [...events]
@@ -290,7 +296,7 @@ test('matchReplayPrefix absorbs a crashed bracket prefix at the tail', () => {
 test('replayOrphanOpen recognizes only bracket-and-marker tails', () => {
   const { events, seqs } = standardLog()
   const plan = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
-  const writes = P.buildReplayWrites(events, { logFrom: plan.replayFrom, logTo: plan.logTo, promptSeq: plan.promptSeq }, 7, 'r', 100, false)
+  const writes = P.buildReplayWrites(events, { logFrom: plan.replayFrom, logTo: plan.logTo, promptSeq: plan.promptSeq, shadowed: plan.shadowed }, 7, 'r', 100, false)
   let working = [...events]
   for (const write of writes.slice(0, 2)) working = [...working, { ...write, seq: working.length, time: 1 }]
   assert.equal(P.openTurn(working), 7, 'the crash landed the replayed turn/start')

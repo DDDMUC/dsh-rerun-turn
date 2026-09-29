@@ -209,6 +209,16 @@ function nextTurn(session) {
   return PLUGIN.lastTurnOf(session.snapshotEvents()) + 1
 }
 
+// The live reply seq of one turn number, for chained-rerun scenarios.
+function turnSpanSeq(session, turn) {
+  const mid = session.snapshotEvents()
+  const nodes = session.surface.nodes
+  const replies = PLUGIN.rerunnableReplies(mid, nodes)
+  const reply = replies.find((entry) => entry.turn === turn)
+  assert.ok(reply, `turn ${turn} has a live reply`)
+  return reply.seq
+}
+
 // --- scenarios -----------------------------------------------------------------
 
 console.log('dsh-rerun-turn surface contract')
@@ -267,6 +277,7 @@ console.log('dsh-rerun-turn surface contract')
     logFrom: record.replayFrom,
     logTo: record.logTo,
     promptSeq: record.promptSeq,
+    shadowed: record.shadowed,
   }
   const writes = PLUGIN.buildReplayWrites(midEvents, replayPlan, PLUGIN.lastTurnOf(midEvents) + 1, rerunId, session.seq, false)
   for (let index = 0; index < writes.length; index += 1) {
@@ -367,7 +378,7 @@ console.log('dsh-rerun-turn surface contract')
   const record = PLUGIN.rerunLedger(midEvents).reruns[0]
   const writes = PLUGIN.buildReplayWrites(
     midEvents,
-    { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq },
+    { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed },
     PLUGIN.lastTurnOf(midEvents) + 1,
     rerunId,
     session.seq,
@@ -393,7 +404,7 @@ console.log('dsh-rerun-turn surface contract')
   const startSeq = session.seq
   const resumedWrites = PLUGIN.buildReplayWrites(
     crashedEvents,
-    { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq },
+    { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed },
     resumedBase,
     rerunId,
     startSeq,
@@ -451,7 +462,7 @@ console.log('dsh-rerun-turn surface contract')
   const record = PLUGIN.rerunLedger(midEvents).reruns[0]
   const writes = PLUGIN.buildReplayWrites(
     midEvents,
-    { logFrom: record.logFrom, logTo: record.logTo, promptSeq: record.promptSeq },
+    { logFrom: record.logFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed },
     PLUGIN.lastTurnOf(midEvents) + 1,
     rerunId,
     session.seq,
@@ -500,7 +511,7 @@ console.log('dsh-rerun-turn surface contract')
   session.append('turn/end', { turn: runTurn, reason: { kind: 'completed' } })
   let mid = session.snapshotEvents()
   let record = PLUGIN.rerunLedger(mid).reruns[0]
-  for (const write of PLUGIN.buildReplayWrites(mid, { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq }, PLUGIN.lastTurnOf(mid) + 1, run.rerunId, session.seq, false)) {
+  for (const write of PLUGIN.buildReplayWrites(mid, { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed }, PLUGIN.lastTurnOf(mid) + 1, run.rerunId, session.seq, false)) {
     if (write.surfaceOp === undefined) session.append(write.type, write.data)
     else session.append(write.type, write.data, { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs })
   }
@@ -534,7 +545,7 @@ console.log('dsh-rerun-turn surface contract')
   session.append('turn/end', { turn: runTurn, reason: { kind: 'completed' } })
   mid = session.snapshotEvents()
   record = PLUGIN.rerunLedger(mid).reruns.find((entry) => entry.rerunId === run.rerunId)
-  for (const write of PLUGIN.buildReplayWrites(mid, { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq }, PLUGIN.lastTurnOf(mid) + 1, run.rerunId, session.seq, false)) {
+  for (const write of PLUGIN.buildReplayWrites(mid, { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed }, PLUGIN.lastTurnOf(mid) + 1, run.rerunId, session.seq, false)) {
     if (write.surfaceOp === undefined) session.append(write.type, write.data)
     else session.append(write.type, write.data, { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs })
   }
@@ -641,7 +652,7 @@ console.log('dsh-rerun-turn surface contract')
   session.append('turn/end', { turn: gen5, reason: { kind: 'completed' } })
   const mid = session.snapshotEvents()
   const record = PLUGIN.rerunLedger(mid).reruns[0]
-  const writes = PLUGIN.buildReplayWrites(mid, { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq }, PLUGIN.lastTurnOf(mid) + 1, rerunId, session.seq, false)
+  const writes = PLUGIN.buildReplayWrites(mid, { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed }, PLUGIN.lastTurnOf(mid) + 1, rerunId, session.seq, false)
   ok('the repair result is copied without sourceEventSeqs; the lost call is gone', () => {
     const repairs = writes.filter((write) => write.type === 'tool/result' && write.data.error && write.data.error.code === 'TOOL_NOT_STARTED')
     assert.equal(repairs.length, 1)
@@ -724,7 +735,7 @@ console.log('dsh-rerun-turn surface contract')
   session.append('turn/end', { turn: gen6, reason: { kind: 'completed' } })
   const mid = session.snapshotEvents()
   const record = PLUGIN.rerunLedger(mid).reruns[0]
-  for (const write of PLUGIN.buildReplayWrites(mid, { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq }, PLUGIN.lastTurnOf(mid) + 1, rerunId, session.seq, false)) {
+  for (const write of PLUGIN.buildReplayWrites(mid, { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed }, PLUGIN.lastTurnOf(mid) + 1, rerunId, session.seq, false)) {
     if (write.surfaceOp === undefined) session.append(write.type, write.data)
     else session.append(write.type, write.data, { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs })
   }
@@ -753,6 +764,92 @@ console.log('dsh-rerun-turn surface contract')
     assert.equal(ledger.reruns[0].complete, true)
     const hiddenSeqs = ledger.hidden.map((entry) => entry.seq)
     assert.ok(hiddenSeqs.includes(turnC.prompt), 'the original prompt the edited carrier stood for is retired for the UI')
+  })
+}
+
+
+// Scenario 7: chained reruns must not resurrect retired log content. A rerun
+// targets an early turn AFTER later reruns have retired parts of the log; the
+// walk range then contains events that left the surface long ago. The replay
+// copies exactly the shadowed surface nodes - never the retired leftovers.
+{
+  const session = makeSession()
+  firstTurn(session, 'A', 'A1')
+  plainTurn(session, 2, 'B', 'B1')
+  plainTurn(session, 3, 'C', 'C1')
+
+  // One full rerun: shadow, regenerate with the plan's own prompt, replay.
+  const runFull = (targetSeq) => {
+    const run = performRerun(session, targetSeq)
+    const genTurn = nextTurn(session)
+    session.append('turn/start', { turn: genTurn })
+    session.append('step/start', { turn: genTurn, step: 1 })
+    session.append(
+      'user/message',
+      userMessage(run.plan.prompt.text, { rpcId: run.promptRequestId }),
+      { surfaceOp: 'append' },
+    )
+    session.append(
+      'assistant/message',
+      { turn: genTurn, step: 1, message: assistantMessage('fresh ' + run.plan.prompt.text), stream: [] },
+      { surfaceOp: 'append' },
+    )
+    session.append('step/end', { turn: genTurn, step: 1 })
+    session.append('turn/end', { turn: genTurn, reason: { kind: 'completed' } })
+    const mid = session.snapshotEvents()
+    const record = PLUGIN.rerunLedger(mid).reruns.find((entry) => entry.rerunId === run.rerunId)
+    for (const write of PLUGIN.buildReplayWrites(
+      mid,
+      { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed },
+      PLUGIN.lastTurnOf(mid) + 1,
+      run.rerunId,
+      session.seq,
+      false,
+    )) {
+      if (write.surfaceOp === undefined) session.append(write.type, write.data)
+      else session.append(write.type, write.data, { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs })
+    }
+    return { run, record }
+  }
+
+  // 1. Rerun B (middle): retires B + C, regenerates B as turn 4, replays C as turn 5.
+  const first = runFull(turnSpanSeq(session, 2))
+  // 2. Rerun A (the first turn): its walk range now spans the ORIGINAL turn 2/3
+  //    brackets - retired by step 1 - while the live content lives later.
+  const second = runFull(turnSpanSeq(session, 1))
+
+  const finalEvents = session.snapshotEvents()
+  officialRoundTrip(finalEvents, { id: session.id, createdAt: Date.now() })
+  const reloaded = Session.create(session.id, finalEvents, {
+    version: SESSION_FORMAT_VERSION,
+    id: session.id,
+    createdAt: Date.now(),
+    isSeeded: false,
+  })
+  ok('a chained rerun replayed only the live surface, never retired log leftovers', () => {
+    const shape = derivedShape(reloaded)
+    assert.deepEqual(shape, [
+      'system:SYSTEM PROMPT',
+      'user:<carrier>',
+      'user:A',
+      'assistant:fresh A',
+      'user:<carrier>',
+      'user:B',
+      'assistant:fresh B',
+      'user:C',
+      'assistant:C1',
+    ])
+  })
+  ok('the second rerun\'s copies cite only surface nodes of its own window', () => {
+    const copies = finalEvents
+      .filter((event) => event.seq > second.record.carrierSeq)
+      .map((event) => PLUGIN.replayMarkerOf(event))
+      .filter((marker) => marker !== null && typeof marker.originalSeq === 'number')
+    assert.ok(copies.length > 0, 'copies landed')
+    const shadowed = new Set(second.record.shadowed)
+    for (const copy of copies) {
+      assert.ok(shadowed.has(copy.originalSeq), `copy cites a shadowed node (${copy.originalSeq})`)
+    }
   })
 }
 
