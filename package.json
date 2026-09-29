@@ -1,0 +1,77 @@
+{
+  "name": "dsh-rerun-turn",
+  "version": "0.1.12",
+  "description": "Infix rerun for DeepSeek Harness: re-run any earlier turn in place - the reply is regenerated from the same prompt while every later turn survives, so subsequent model calls read A B C1 D E F G. Implemented with the official surface-replace contract plus a faithful replay of the tail; the append-only session log is never rewritten.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "rerun",
+    "regenerate",
+    "turn",
+    "infix",
+    "surface-replace",
+    "replay"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DDDMUC/dsh-rerun-turn.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "verify:contract": "node tools/verify-surface-contract.mjs",
+    "verify:client": "node tools/verify-client-static.mjs",
+    "verify:live": "node tools/verify-client-static.mjs --token-file",
+    "verify:e2e": "bash tools/verify-live-e2e.sh",
+    "probe:loaded": "node tools/probe-loaded.mjs",
+    "check": "npm run test && npm run verify:contract && npm run verify:client"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-session": "^0.1.7-rc.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-settings": "^0.1.5-alpha.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.5-alpha.1 || ^0.2.0-rc.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
+    },
+    "engines": {
+      "dsh": ">=0.1.6-alpha.2"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.1.7-rc.2": "compatible"
+      }
+    }
+  }
+}
