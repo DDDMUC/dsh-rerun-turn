@@ -125,6 +125,12 @@ assert(
 const after = await call('GET', `/dsh-rerun-turn/dev/derived?sessionId=${encodeURIComponent(sessionId)}`)
 assert(after.status === 200 && after.body.ok, 'the derived context reads after the rerun')
 const derived = after.body.derived
+// The rerun's bookkeeping carrier must never reach the model: no blank or
+// zero-width user message in the derived input.
+const blankMessages = derived.filter(
+  (entry) => entry.role === 'user' && (entry.text || '').replace(/[\u200B\uFEFF\s]/g, '') === '',
+)
+assert(blankMessages.length === 0, 'no blank or zero-width user message reaches the model')
 const userIndexes = derived
   .map((entry, index) => (entry.role === 'user' && entry.text.includes('TOKEN-') ? index : -1))
   .filter((index) => index >= 0)
