@@ -194,7 +194,7 @@ function performRerun(session, targetSeq) {
   const plan = PLUGIN.planRerun(events, surface, { seq: targetSeq })
   const rerunId = randomUUID()
   const promptRequestId = randomUUID()
-  for (const write of PLUGIN.buildShadowWrites(plan, rerunId, promptRequestId)) {
+  for (const write of PLUGIN.buildShadowWrites(plan, PLUGIN.lastTurnOf(events) + 1, rerunId, promptRequestId)) {
     if (write.surfaceOp === undefined) session.append(write.type, write.data)
     else session.append(write.type, write.data, { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs })
   }
@@ -311,7 +311,6 @@ console.log('dsh-rerun-turn surface contract')
       'assistant:A1',
       'user:B',
       'assistant:B1',
-      'user:<carrier>',
       'user:C',
       'assistant:C1 fresh',
       'user:D',
@@ -433,7 +432,6 @@ console.log('dsh-rerun-turn surface contract')
       'system:SYSTEM PROMPT',
       'user:A',
       'assistant:A1',
-      'user:<carrier>',
       'user:C',
       'assistant:C1 fresh',
       'user:D',
@@ -481,7 +479,7 @@ console.log('dsh-rerun-turn surface contract')
     isSeeded: false,
   })
   ok('a failed admission replays the prompt too - the context keeps its content', () => {
-    assert.deepEqual(derivedShape(reloaded), [...before.slice(0, 3), 'user:<carrier>', ...before.slice(3)])
+    assert.deepEqual(derivedShape(reloaded), before)
   })
   ok('that rerun counts as complete (the prompt travelled as a copy)', () => {
     assert.equal(PLUGIN.rerunLedger(finalEvents).reruns[0].complete, true)
@@ -562,8 +560,6 @@ console.log('dsh-rerun-turn surface contract')
       'system:SYSTEM PROMPT',
       'user:A',
       'assistant:A1',
-      'user:<carrier>',
-      'user:<carrier>',
       'user:C',
       'assistant:C1 second rerun',
       'user:D',
@@ -682,7 +678,6 @@ console.log('dsh-rerun-turn surface contract')
     const shape = derivedShape(reloaded)
     assert.deepEqual(shape, [
       'system:SYSTEM PROMPT',
-      'user:<carrier>',
       'user:C',
       'assistant:C1 fresh',
       'user:D',
@@ -752,7 +747,6 @@ console.log('dsh-rerun-turn surface contract')
       'system:SYSTEM PROMPT',
       'user:A',
       'assistant:A1',
-      'user:<carrier>',
       'user:C edited',
       'assistant:C1 fresh',
       'user:D',
@@ -830,10 +824,8 @@ console.log('dsh-rerun-turn surface contract')
     const shape = derivedShape(reloaded)
     assert.deepEqual(shape, [
       'system:SYSTEM PROMPT',
-      'user:<carrier>',
       'user:A',
       'assistant:fresh A',
-      'user:<carrier>',
       'user:B',
       'assistant:fresh B',
       'user:C',
