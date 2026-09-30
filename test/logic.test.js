@@ -415,3 +415,191 @@ test('rerunLedger hides originals whose live stand-in the rerun retired', () => 
   assert.ok(hiddenSeqs.includes(seqs.c.seq), 'the original the carrier stood for is hidden too')
   assert.ok(!hiddenSeqs.includes(seqs.a1.seq), 'nodes before the window stay visible')
 })
+
+test('rerunLedger never demands a copy for a shadowed system message', () => {
+  const b = buildEvents()
+  b.turnStart(1)
+  b.stepStart(1, 1)
+  b.user('A')
+  b.assistant(1, 1, 'A1')
+  b.stepEnd(1, 1)
+  b.turnEnd(1)
+  b.turnStart(2)
+  b.stepStart(2, 1)
+  b.user('C')
+  const c1 = b.assistant(2, 1, 'C1')
+  b.stepEnd(2, 1)
+  b.turnEnd(2)
+  b.turnStart(3)
+  b.stepStart(3, 1)
+  // The loop-owned system prompt of the tail turn: a surface node the replay
+  // walk never copies. It sits inside the rerun window AND inside the walk
+  // range, which used to leave it eternally "missing" - and an eternally
+  // missing seq makes every `/state` poll re-append the whole replay batch.
+  const system = b.push(
+    b.next('system/message', { id: uid('m'), role: 'system', content: [textBlock('You are a helpful assistant.')], source: null }, { surfaceOp: 'append' }),
+  )
+  b.user('D')
+  b.assistant(3, 1, 'D1')
+  b.stepEnd(3, 1)
+  b.turnEnd(3)
+  const events = b.events
+  const nodes = surfaceOf(events)
+  assert.ok(nodes.includes(system.seq), 'the system message is on the surface')
+  const plan = P.planRerun(events, nodes, { seq: c1.seq })
+  const rerunId = 'rerun-1'
+  const promptRequestId = 'req-1'
+  let working = [...events]
+  for (const write of P.buildShadowWrites(plan, 4, rerunId, promptRequestId)) {
+    working = [
+      ...working,
+      { ...write, seq: working.length, time: 1, ...(write.surfaceOp === undefined ? {} : { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs }) },
+    ]
+  }
+  working = [
+    ...working,
+    {
+      type: 'user/message',
+      seq: working.length,
+      time: 1,
+      data: { id: uid('m'), role: 'user', content: [textBlock('C')], source: { kind: 'user', rpcId: promptRequestId } },
+      surfaceOp: 'append',
+    },
+  ]
+  let ledger = P.rerunLedger(working)
+  const record = ledger.reruns[0]
+  assert.ok(!record.missing.includes(system.seq), 'a system node is never expected to be copied')
+  assert.ok(record.missing.length > 0, 'the copyable tail is still missing before the replay')
+  const writes = P.buildReplayWrites(
+    working,
+    { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed },
+    4,
+    rerunId,
+    working.length,
+    false,
+  )
+  working = [
+    ...working,
+    ...writes.map((write, index) => ({
+      ...write,
+      seq: working.length + index,
+      time: 1,
+      ...(write.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: write.sourceEventSeqs }),
+    })),
+  ]
+  ledger = P.rerunLedger(working)
+  assert.equal(ledger.reruns[0].complete, true, 'the uncopied system node must not hold the rerun incomplete')
+  assert.deepEqual(ledger.reruns[0].missing, [])
+})
+
+test('retiredTurnList lists fully retired turns; carriers and live turns never appear', () => {
+  const { events, seqs } = standardLog()
+  const plan = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
+  const rerunId = 'rerun-1'
+  const promptRequestId = 'req-1'
+  let working = [...events]
+  for (const write of P.buildShadowWrites(plan, 5, rerunId, promptRequestId)) {
+    working = [
+      ...working,
+      { ...write, seq: working.length, time: 1, ...(write.surfaceOp === undefined ? {} : { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs }) },
+    ]
+  }
+  // Mid-flight (the prompt has not landed; the task holds the lock, so this
+  // rerun is the one in flight): no retirement counts yet, so nothing is
+  // marked retired - not even the now-empty window turns.
+  let ledger = P.rerunLedger(working)
+  let folded = P.foldSurface(working)
+  assert.deepEqual(P.retiredTurnList(working, folded, ledger, { inFlightId: rerunId }), [])
+  working = [
+    ...working,
+    {
+      type: 'user/message',
+      seq: working.length,
+      time: 1,
+      data: { id: uid('m'), role: 'user', content: [textBlock('C')], source: { kind: 'user', rpcId: promptRequestId } },
+      surfaceOp: 'append',
+    },
+  ]
+  ledger = P.rerunLedger(working)
+  const record = ledger.reruns[0]
+  const writes = P.buildReplayWrites(
+    working,
+    { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed },
+    5,
+    rerunId,
+    working.length,
+    false,
+  )
+  working = [
+    ...working,
+    ...writes.map((write, index) => ({
+      ...write,
+      seq: working.length + index,
+      time: 1,
+      ...(write.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: write.sourceEventSeqs }),
+    })),
+  ]
+  ledger = P.rerunLedger(working)
+  folded = P.foldSurface(working)
+  assert.equal(ledger.reruns[0].complete, true)
+  const turnOf = P.turnIndex(working)
+  const retired = P.retiredTurnList(working, folded, ledger, { inFlightId: null })
+  // Both original turns are gone: the target reply's turn (its whole window was
+  // shadowed) and the tail turn (its prompt and reply were replayed into new
+  // turns - the originals are retired).
+  assert.ok(retired.includes(turnOf.get(seqs.c1.seq)), 'the target turn is retired')
+  assert.ok(retired.includes(turnOf.get(seqs.d1.seq)), 'the replayed originals\u2019 turn is retired')
+  const hiddenTurns = new Set(ledger.hidden.filter((entry) => typeof entry.turn === 'number').map((entry) => entry.turn))
+  const markerTurns = new Set(ledger.reruns.map((entry) => entry.carrierTurn).filter((turn) => typeof turn === 'number'))
+  const hiddenSeqs = new Set(ledger.hidden.map((entry) => entry.seq))
+  const visibleTurns = new Set()
+  for (const seq of folded.nodes) {
+    if (hiddenSeqs.has(seq)) continue
+    const turn = turnOf.get(seq)
+    if (typeof turn === 'number') visibleTurns.add(turn)
+  }
+  for (const turn of retired) {
+    assert.ok(hiddenTurns.has(turn), 'only turns with retired nodes are listed')
+    assert.ok(!markerTurns.has(turn), 'carrier turns are markerTurns, never retiredTurns')
+    assert.ok(!visibleTurns.has(turn), 'a turn with visible nodes is never retired')
+  }
+  // An in-flight rerun's retirements wait for its replacement on screen.
+  assert.deepEqual(P.retiredTurnList(working, folded, ledger, { inFlightId: rerunId }), [])
+  // A brackets-only turn (no surface node) renders as an empty strip. It is
+  // retired unless it is the trailing turn (a generation may be in flight).
+  const lastTurn = working.reduce((max, event) => (event.type === 'turn/start' && typeof event.data.turn === 'number' && event.data.turn > max ? event.data.turn : max), 0)
+  const emptyTurn = lastTurn + 1
+  const tailTurn = lastTurn + 2
+  working.push({ type: 'turn/start', seq: working.length, time: 1, data: { turn: emptyTurn } })
+  working.push({ type: 'step/start', seq: working.length, time: 1, data: { turn: emptyTurn, step: 1 } })
+  working.push({ type: 'step/end', seq: working.length, time: 1, data: { turn: emptyTurn, step: 1 } })
+  working.push({ type: 'turn/end', seq: working.length, time: 1, data: { turn: emptyTurn, reason: { kind: 'completed' } } })
+  working.push({ type: 'turn/start', seq: working.length, time: 1, data: { turn: tailTurn } })
+  working.push({ type: 'step/start', seq: working.length, time: 1, data: { turn: tailTurn, step: 1 } })
+  working.push({
+    type: 'user/message',
+    seq: working.length,
+    time: 1,
+    data: { id: uid('m'), role: 'user', content: [textBlock('E')], source: { kind: 'user' } },
+    surfaceOp: 'append',
+  })
+  working.push({
+    type: 'assistant/message',
+    seq: working.length,
+    time: 1,
+    data: {
+      turn: tailTurn,
+      step: 1,
+      message: { id: uid('m'), role: 'assistant', content: [textBlock('E1')], source: { kind: 'model' } },
+      stream: [],
+    },
+    surfaceOp: 'append',
+  })
+  working.push({ type: 'step/end', seq: working.length, time: 1, data: { turn: tailTurn, step: 1 } })
+  working.push({ type: 'turn/end', seq: working.length, time: 1, data: { turn: tailTurn, reason: { kind: 'completed' } } })
+  ledger = P.rerunLedger(working)
+  folded = P.foldSurface(working)
+  const retiredWithEmpty = P.retiredTurnList(working, folded, ledger, { inFlightId: null })
+  assert.ok(retiredWithEmpty.includes(emptyTurn), 'a brackets-only turn is retired')
+  assert.ok(!retiredWithEmpty.includes(tailTurn), 'the trailing turn is a generation in flight and stays')
+})
