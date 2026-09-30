@@ -603,3 +603,93 @@ test('retiredTurnList lists fully retired turns; carriers and live turns never a
   assert.ok(retiredWithEmpty.includes(emptyTurn), 'a brackets-only turn is retired')
   assert.ok(!retiredWithEmpty.includes(tailTurn), 'the trailing turn is a generation in flight and stays')
 })
+
+test('a rerun over a twice-rewritten prompt reads the latest wording and retires the chain exactly once', () => {
+  const { events, seqs } = standardLog()
+  // dsh-edit-turn rewrites turn 2's prompt in place twice: C -> first -> second.
+  // Each rewrite is one node replaced by a carrier carrying the new wording.
+  const rewrite = (seq, targetSeq, text) => ({
+    type: 'user/message',
+    seq,
+    time: 1,
+    data: {
+      id: uid('m'),
+      role: 'user',
+      content: [textBlock(text)],
+      source: { kind: 'plugin:dsh-edit-turn', editedBy: 'dsh-edit-turn' },
+    },
+    surfaceOp: { op: 'replace', startSeq: targetSeq, endSeq: targetSeq },
+    sourceEventSeqs: [targetSeq],
+  })
+  const first = rewrite(events.length, seqs.c.seq, 'C edited once')
+  const second = rewrite(events.length + 1, first.seq, 'C edited twice')
+  let log = [...events, first, second]
+  const surface = surfaceOf(log)
+  assert.ok(surface.includes(second.seq), 'the newest carrier stands on the surface')
+
+  // The follow-the-rewrite chase has to walk the whole chain, not one hop.
+  const plan = P.planRerun(log, surface, { seq: seqs.c1.seq })
+  assert.equal(plan.promptSeq, second.seq, 'the plan addresses the newest live carrier')
+  assert.equal(plan.startSeq, second.seq, 'the shadow window opens at the live node')
+  assert.equal(plan.prompt.text, 'C edited twice', 'the rerun re-sends the latest wording')
+  assert.ok(!plan.shadowed.includes(first.seq) && !plan.shadowed.includes(seqs.c.seq), 'dead carriers are not in the window')
+
+  const rerunId = 'run-1'
+  const promptRequestId = 'req-1'
+  for (const write of P.buildShadowWrites(plan, 5, rerunId, promptRequestId)) {
+    log = [
+      ...log,
+      { ...write, seq: log.length, time: 1, ...(write.surfaceOp === undefined ? {} : { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs }) },
+    ]
+  }
+  let ledger = P.rerunLedger(log)
+  assert.equal(ledger.reruns.length, 1, 'only this plugin\'s carrier opens a rerun record')
+  assert.equal(ledger.reruns[0].promptSeq, plan.promptSeq, 'the plan and the ledger name the same live prompt')
+  let hiddenSeqs = ledger.hidden.map((entry) => entry.seq)
+  for (const seq of [second.seq, first.seq, seqs.c.seq]) {
+    // A row is retired once: the shadowed carrier and the originals its chain
+    // stands for must not be listed twice (nor left behind).
+    assert.equal(hiddenSeqs.filter((value) => value === seq).length, 1, `seq ${seq} is retired exactly once`)
+  }
+  assert.ok(!hiddenSeqs.includes(seqs.a1.seq), 'nodes before the window stay visible')
+  assert.ok(ledger.reruns[0].missing.includes(second.seq), 'the re-sent prompt is the one thing still awaited')
+
+  // The regeneration re-sends the prompt, then the tail is replayed.
+  log = [
+    ...log,
+    {
+      type: 'user/message',
+      seq: log.length,
+      time: 1,
+      data: { id: uid('m'), role: 'user', content: [textBlock('C edited twice')], source: { kind: 'user', rpcId: promptRequestId } },
+      surfaceOp: 'append',
+    },
+  ]
+  ledger = P.rerunLedger(log)
+  const record = ledger.reruns[0]
+  assert.ok(!record.missing.includes(second.seq), 'the landed prompt is covered by its rpcId')
+  const writes = P.buildReplayWrites(
+    log,
+    { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed },
+    5,
+    rerunId,
+    log.length,
+    false,
+  )
+  log = [
+    ...log,
+    ...writes.map((write, index) => ({
+      ...write,
+      seq: log.length + index,
+      time: 1,
+      ...(write.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: write.sourceEventSeqs }),
+    })),
+  ]
+  ledger = P.rerunLedger(log)
+  assert.equal(ledger.reruns[0].complete, true, 'a two-hop rewrite does not leave the rerun eternally incomplete')
+  assert.deepEqual(ledger.reruns[0].missing, [])
+  hiddenSeqs = ledger.hidden.map((entry) => entry.seq)
+  for (const seq of [second.seq, first.seq, seqs.c.seq]) {
+    assert.equal(hiddenSeqs.filter((value) => value === seq).length, 1, `seq ${seq} is still retired exactly once after the replay`)
+  }
+})
