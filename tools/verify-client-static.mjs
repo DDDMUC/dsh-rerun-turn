@@ -146,7 +146,25 @@ assert.ok(clientSource.includes("if (foreignHideOn(row, 'dsrr') === true) return
 // I3: the nodes injected into a message row carry their namespace.
 assert.ok(clientSource.includes("host.dataset.dsrrActionHost = '1'"), 'the injected host is namespaced')
 assert.ok(clientSource.includes("button.dataset.dsrrAction = 'rerun'"), 'the injected button is namespaced')
+assert.ok(clientSource.includes("'data-dsrr-action': 'rerun'"), 'the strip button carries the namespace too')
 ok('the hide attribution and the namespaced injection are wired')
+
+// I3: a re-apply must REUSE the node a previous instance left instead of
+// building a second one, and a dispose must sweep this plugin's own nodes -
+// found by namespace attribute, because the WeakMap dies with the instance.
+const HOST_SELECTOR_SOURCE = 'const HOST_SELECTOR = ' + String.raw`'[data-dsrr-action-host="1"]'`
+const BUTTON_SELECTOR_SOURCE = 'const PROMPT_BUTTON_SELECTOR = ' + String.raw`'[data-dsrr-action="rerun"]'`
+assert.ok(clientSource.includes(HOST_SELECTOR_SOURCE), 'the host selector is namespaced')
+assert.ok(clientSource.includes(BUTTON_SELECTOR_SOURCE), 'the button selector is namespaced')
+assert.ok(clientSource.includes('const OWNED_SELECTOR = '), 'the dispose sweep covers every node of this plugin')
+assert.ok(
+  clientSource.includes('row.querySelectorAll(HOST_SELECTOR)'),
+  'an existing host is looked up before one is built',
+)
+assert.ok(clientSource.includes('sweepOwnedNodes(undefined, HOST_SELECTOR)'), 'the disposer sweeps the injected hosts')
+assert.ok(clientSource.includes('sweepOwnedNodes(undefined, CSS_SELECTOR)'), 'the disposer drops its own stylesheet too')
+assert.ok(clientSource.includes('sweepOwnedNodes()'), 'the disposer re-checks the React-owned nodes')
+ok('a re-apply adopts the previous host, and a dispose sweeps this plugin' + "'" + 's nodes')
 
 // --- optional: the running instance serves these bytes ------------------------
 

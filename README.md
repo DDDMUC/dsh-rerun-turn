@@ -112,9 +112,9 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| 纯逻辑单测（窗口规划、重放改写、标记、恢复匹配、计数器同步） | `npm test` | **13 项通过** |
-| 官方校验器契约（真实 `Session` + `sessionFormatCatalog` **strict 冷读**往返） | `npm run verify:contract` | **17 项通过**：完整重跑后的日志（含重跑后新增的普通轮）通过 v4 词汇表/关系/生命周期 + `Session.fromRestore`；派生上下文恰好 **A B C1' D' E'**；链式重跑；崩溃半写后续传；准入失败回退；`TOOL_NOT_STARTED` 修复保真 |
-| 客户端静态检查 + 运行中实例下发字节 | `npm run verify:client` / `npm run verify:live -- <token 日志>` | **6 项通过**：模块可加载、槽位/字典/版本/错误码一致；3080 实例下发的模块组里就是本插件的当前字节 |
+| 单测（窗口规划、重放改写、标记、恢复匹配、计数器同步，+ 客户端 DOM stub 的注入/隐藏/重装用例） | `npm test` | **26 项通过**（18 宿主 + 8 客户端 DOM） |
+| 官方校验器契约（真实 `Session` + `sessionFormatCatalog` **strict 冷读**往返） | `npm run verify:contract` | **22 项通过**：完整重跑后的日志（含重跑后新增的普通轮）通过 v4 词汇表/关系/生命周期 + `Session.fromRestore`；派生上下文恰好 **A B C1' D' E'**；链式重跑；崩溃半写后续传；准入失败回退；`TOOL_NOT_STARTED` 修复保真 |
+| 客户端静态检查 + 运行中实例下发字节 | `npm run verify:client` / `npm run verify:live -- <token 日志>` | **7 项通过**：模块可加载、槽位/字典/版本/错误码一致；3080 实例下发的模块组里就是本插件的当前字节 |
 | **真实沙箱端到端**（独立 DSH_HOME + 独立端口，真实模型调用） | `npm run verify:e2e` | **通过**：3 轮 scratch 会话 → `/apply` 重跑中间轮 → 后台生成+重放完成 → **追加第 4 轮提示** → 读**实时派生上下文**：提示词保序、中间回答是新生成的、后一轮是带 `originalSeq` 标记的重放副本；随后用 `tools/repair-session.mjs` 对沙箱写出的日志做**严格冷读校验：0 broken** |
 | 运行中实例挂载探针 | `npm run probe:loaded [端口]` | 通过：`/state` 返 400、`/apply` 返 405 |
 
@@ -148,6 +148,11 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
    工具只自动修复带 `plugin:dsh-rerun-turn` 标记的坏日志；其他坏日志只报告不动。修复后重开会话，待处理的提示词会被循环自动补答。
 
 ### 更新日志
+
+**0.1.22** —— 修复「重新 apply 时注入节点不清理 → 幽灵按钮堆积」：行内注入前先复用已有宿主（不再删旧的再造新的），fiber dispose 时按命名空间属性清扫本插件的注入节点。
+
+- **先复用**：注入前按 `[data-dsrr-action-host="1"]` 查一次行内已有宿主，找到就复用同一个节点（WeakMap 重新指向它），绝不新建第二个；重复的旧副本（本插件自己的节点）才删。
+- **卸载即清理**：dispose 里同步扫掉自建的宿主（含行内按钮）与本插件 append 的样式表，并在下一个任务再扫一次由 React 渲染的节点（回答条按钮、浮层根）——React 会自己卸载它们，抢在它前面删会让 React 的 removeChild 抛错。只删本插件自己的节点（`data-dsrr-*` 命名空间 / 本插件 id 的 `style`），宿主与兄弟插件的节点一律不动。
 
 **0.1.21** —— 互操作加固（AI Studio 组件契约）：输入框浮层槽位号 8 → 10、隐藏归属守卫、注入节点带命名空间。
 
@@ -392,9 +397,9 @@ re-sync API). The `tools/repair-session.mjs` utility repairs logs written by
 
 | Check | Command | Result |
 |---|---|---|
-| Pure-logic unit tests | `npm test` | 12 passed |
-| Real-validator contract (encode/restore round-trip) | `npm run verify:contract` | 17 passed: the rerun log survives the v4 vocabulary/relationship/lifecycle validators plus `Session.fromRestore`; the derived context is exactly **A B C1' D' E'**; chained reruns; crash-resume; admission-failure fallback; `TOOL_NOT_STARTED` fidelity |
-| Client statics + live delivery bytes | `npm run verify:client` / `verify:live` | 6 passed |
+| Unit tests (host logic + client DOM stub: injection, hiding, re-apply) | `npm test` | 26 passed (18 host + 8 client DOM) |
+| Real-validator contract (encode/restore round-trip) | `npm run verify:contract` | 22 passed: the rerun log survives the v4 vocabulary/relationship/lifecycle validators plus `Session.fromRestore`; the derived context is exactly **A B C1' D' E'**; chained reruns; crash-resume; admission-failure fallback; `TOOL_NOT_STARTED` fidelity |
+| Client statics + live delivery bytes | `npm run verify:client` / `verify:live` | 7 passed |
 | **Real sandbox end-to-end** (isolated DSH_HOME/port, real model calls) | `npm run verify:e2e` | Passed: a 3-turn scratch session, the middle turn rerun via `/apply`, background regeneration + replay, and the **live derived context** asserted to be the spliced order with a marked replay copy |
 | Mounted-instance probe | `npm run probe:loaded [port]` | Passed |
 
@@ -420,6 +425,11 @@ button before relying on it.
 - There is no undo (use the official fork for branching, not implemented).
 
 ### Changelog
+
+**0.1.22** — Fixed the ghost-button build-up on re-apply: the pass now reuses the host already in the row instead of deleting it and building another one, and a fiber dispose sweeps every node of this plugin's namespace.
+
+- A host found by `[data-dsrr-action-host="1"]` is adopted (the WeakMap is re-pointed at it), so a re-apply - HMR, plugin toggle, bundle reload - leaves exactly one button on the row; only extra copies left by an older build are dropped.
+- The dispose sweep runs by attribute, never through the WeakMap: hosts and this plugin's own stylesheet synchronously, the React-rendered nodes (strip button, overlay root) one task later, because React unmounts those itself and pulling them first would make its own `removeChild` throw. Only this plugin's own nodes are ever touched.
 
 **0.1.21** — Interop hardening for the AI Studio component contract: the input-overlay slot moves to order 10 (delete-turn 8 / edit-turn 9), a reopen never clears a sibling plugin's hide and never touches a `display:none` this plugin did not set, and the injected row nodes carry their `data-dsrr-*` namespace.
 
