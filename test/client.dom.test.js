@@ -163,9 +163,15 @@ globalThis.document = {
   body: new FakeNode('body'),
   head: new FakeNode('head'),
   createElement: (tag) => new FakeNode(tag),
-  // The style probe finds its own tag; everything else is absent.
-  querySelector: (selector) => (String(selector).includes('data-plugin-css') ? new FakeNode('style') : null),
-  querySelectorAll: (selector) => (selector === '[data-chat-flow-key]' ? transcriptRows.slice() : []),
+  // The style probe finds its own tag, the transcript answers the flow-key
+  // query, and anything else is looked up in the body the way a browser would
+  // (the dispose sweep walks the whole page, not just the transcript list).
+  querySelector: (selector) =>
+    String(selector).includes('data-plugin-css')
+      ? new FakeNode('style')
+      : globalThis.document.body.querySelector(selector),
+  querySelectorAll: (selector) =>
+    selector === '[data-chat-flow-key]' ? transcriptRows.slice() : globalThis.document.body.querySelectorAll(selector),
 }
 let captured = null
 globalThis.window = {
@@ -188,11 +194,12 @@ const reactStub = {
   createElement: () => null,
 }
 const jsxRuntimeStub = { jsx: () => null, jsxs: () => null, Fragment: {} }
-const client = captured.factory((specifier) => {
-  if (specifier === 'react') return reactStub
+const stubRequireFor = (react) => (specifier) => {
+  if (specifier === 'react') return react
   if (specifier === 'react/jsx-runtime') return jsxRuntimeStub
   throw new Error(`unexpected require: ${specifier}`)
-})
+}
+const client = captured.factory(stubRequireFor(reactStub))
 
 const registrations = []
 client.apply({
@@ -264,18 +271,26 @@ function view(patch) {
   })
 }
 
-/** Run one real applyDom pass through the registered overlay entry. */
-function pass(currentView, nodes) {
-  effects.length = 0
-  const controller = {
+/** The controller surface applyDom touches, with every rerun it was asked for. */
+function stubController(currentView) {
+  return {
     rowCount: -1,
+    rerunCalls: [],
     load() {},
     stopPolling() {},
     ensurePolling() {},
     subscribe: () => () => {},
-    rerun() {},
+    rerun(entry) {
+      this.rerunCalls.push(entry)
+    },
     getSnapshot: () => currentView,
   }
+}
+
+/** Run one real applyDom pass through the registered overlay entry. */
+function pass(currentView, nodes) {
+  effects.length = 0
+  const controller = stubController(currentView)
   overlaySlot.entry({
     useChat: () => ({ nodes: new Map(Object.entries(nodes)) }),
     useRerunTurn: () => currentView,
@@ -409,19 +424,204 @@ test('the user-row button is injected once, namespaced, and never disturbs forei
   assert.equal(bar.childNodes.includes(sibling), true)
 })
 
-test('a leftover host from a previous instance is swept, not stacked', () => {
+test('a host left by a previous instance is adopted, and only extra copies are dropped', () => {
   const node = row('user5', 1)
   const { bar } = actionsBar(node, 1)
   const orphan = new FakeNode('span')
   orphan.className = 'dsrr-action-host'
   orphan.dataset.dsrrActionHost = '1'
   bar.appendChild(orphan)
+  // An older build stacked a second one: it is this plugin's own node, so it is
+  // the one thing the pass may drop - the first host is reused, not replaced
+  // (contract I3: repeat renders reuse the node they find).
+  const extra = new FakeNode('span')
+  extra.className = 'dsrr-action-host'
+  extra.dataset.dsrrActionHost = '1'
+  bar.appendChild(extra)
   transcriptRows.length = 0
   transcriptRows.push(node)
 
   pass(view({ replies: new Map([[9, { seq: 9, turn: 1, messageId: 'm-9' }]]) }), { user5: { kind: 'user', data: { seq: 5 } } })
   const hosts = bar.querySelectorAll('[data-dsrr-action-host="1"]')
-  assert.equal(hosts.length, 1, 'one host, not two')
-  assert.notEqual(hosts[0], orphan)
-  assert.equal(bar.childNodes.includes(orphan), false)
+  assert.equal(hosts.length, 1, 'one host, not three')
+  assert.equal(hosts[0], orphan, 'the node that was already there is the one that stays')
+  assert.equal(bar.childNodes.includes(extra), false, 'the stacked copy is gone')
 })
+
+// --- I3 re-apply: dispose cleans up, a re-apply adopts -------------------------
+
+/** A fresh factory call is a fresh module instance: its WeakMaps start empty,
+ * which is what an HMR reload / a plugin re-apply hands the page. */
+function freshInstance() {
+  const instanceEffects = []
+  const instance = captured.factory(stubRequireFor({ ...reactStub, useEffect: (fn) => instanceEffects.push(fn) }))
+  return { instance, effects: instanceEffects }
+}
+
+/** Apply a module instance against a disposable stub context. */
+function applyInstance(instance) {
+  const disposers = []
+  const registrations = []
+  instance.apply({
+    effect(fn) {
+      const disposer = fn()
+      if (typeof disposer === 'function') disposers.push(disposer)
+      return () => {}
+    },
+    locale: { register() {} },
+    slots: {
+      inject(name, register) {
+        register()
+      },
+      register(config, entry) {
+        registrations.push({ config, entry })
+        return () => {}
+      },
+    },
+  })
+  return {
+    overlay: registrations.find((item) => item.config.name === 'conversation.input.overlay'),
+    /** Cordis disposes a fiber's effects in reverse registration order. */
+    dispose() {
+      for (let index = disposers.length - 1; index >= 0; index -= 1) disposers[index]()
+    },
+  }
+}
+
+/** One real applyDom pass through a given instance's overlay entry. */
+function runPass(handle, currentView, nodes, instanceEffects) {
+  instanceEffects.length = 0
+  const controller = stubController(currentView)
+  handle.overlay.entry({
+    useChat: () => ({ nodes: new Map(Object.entries(nodes)) }),
+    useRerunTurn: () => currentView,
+    controller,
+    t: (key) => key,
+  })
+  for (const effect of instanceEffects) effect()
+  return { controller }
+}
+
+/** The page the global dispose sweep walks. */
+function resetPage() {
+  for (const child of [...globalThis.document.body.childNodes]) child.remove()
+  transcriptRows.length = 0
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+test('a re-apply adopts the host, and a late pass of the previous instance cannot stack it', async () => {
+  resetPage()
+  const node = row('user21', 4)
+  const { bar, buttons } = actionsBar(node, 2)
+  const sibling = new FakeNode('span')
+  sibling.className = 'dshet-action-host'
+  sibling.dataset.dshetActionHost = '1'
+  bar.appendChild(sibling)
+  globalThis.document.body.appendChild(node)
+  transcriptRows.push(node)
+  const nodes = { user21: { kind: 'user', data: { seq: 21 } } }
+  const live = view({ replies: new Map([[41, { seq: 41, turn: 4, messageId: 'm-41' }]]) })
+  const hosts = () => bar.querySelectorAll('[data-dsrr-action-host="1"]')
+  const foreign = () =>
+    bar.childNodes.filter((child) => child.getAttribute('data-dsrr-action-host') !== '1').map((child) => child.className || child.tagName)
+
+  // Round 1: the first instance injects its host.
+  const first = freshInstance()
+  const handle1 = applyInstance(first.instance)
+  const pass1 = runPass(handle1, live, nodes, first.effects)
+  assert.equal(hosts().length, 1, 'the first pass injects exactly one host')
+  const host = hosts()[0]
+  const button = host.querySelector('[data-dsrr-action="rerun"]')
+  assert.ok(button, 'the host carries the namespaced button')
+  const neighbours = foreign()
+
+  // Round 2: a re-apply that starts while the previous instance's node is still
+  // in the row - the state the probe caught, because the previous instance's
+  // MutationObserver outlives its teardown by a task.
+  const second = freshInstance()
+  const handle2 = applyInstance(second.instance)
+  const pass2 = runPass(handle2, live, nodes, second.effects)
+  assert.equal(hosts().length, 1, 'the re-apply adopts instead of adding a second host')
+  assert.equal(hosts()[0], host, 'the node the previous instance injected is reused')
+  assert.deepEqual(foreign(), neighbours, 'no foreign node was added, moved or dropped')
+
+  // The dying instance wakes on that childList churn and runs one more pass.
+  runPass(handle1, live, nodes, first.effects)
+  assert.equal(hosts().length, 1, 'one host after the late pass of the previous instance')
+  assert.equal(hosts()[0], host)
+
+  // The adopted button acts on the CURRENT instance, never on a stale closure.
+  button.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
+  assert.equal(pass2.controller.rerunCalls.length, 1, 'the click reached the live controller')
+  assert.equal(pass1.controller.rerunCalls.length, 0, 'the dead instance did not act')
+
+  // The first instance finally tears down: every node of this namespace goes -
+  // including the one the live instance adopted - and the live instance's next
+  // pass injects its own again (the removal is a mutation, so it wakes).
+  handle1.dispose()
+  await settle()
+  assert.equal(hosts().length, 0, "dispose sweeps this plugin's own nodes")
+  assert.equal(bar.childNodes.includes(sibling), true, "the sibling plugin's node survives")
+  assert.deepEqual(buttons.map((item) => bar.childNodes.includes(item)), [true, true], 'the platform buttons survive')
+  runPass(handle2, live, nodes, second.effects)
+  assert.equal(hosts().length, 1, 'the live instance re-injects on the next pass')
+  assert.deepEqual(foreign(), neighbours, 'and the neighbours are still untouched')
+
+  // Its own teardown leaves nothing behind either.
+  handle2.dispose()
+  await settle()
+  assert.equal(hosts().length, 0, 'no ghost host is left behind')
+  assert.equal(bar.childNodes.includes(sibling), true)
+
+  // Round 3, after two full dispose cycles: still exactly one host.
+  const third = freshInstance()
+  const handle3 = applyInstance(third.instance)
+  runPass(handle3, live, nodes, third.effects)
+  assert.equal(hosts().length, 1, 'two apply/dispose rounds still leave one host')
+  assert.deepEqual(foreign(), neighbours)
+  handle3.dispose()
+  await settle()
+  assert.equal(hosts().length, 0)
+})
+
+test('a dispose clears every node this plugin injected and nothing else', async () => {
+  resetPage()
+  const node = row('user22', 5)
+  const { bar } = actionsBar(node, 1)
+  globalThis.document.body.appendChild(node)
+  transcriptRows.push(node)
+  const nodes = { user22: { kind: 'user', data: { seq: 22 } } }
+  const live = view({ replies: new Map([[42, { seq: 42, turn: 5, messageId: 'm-42' }]]) })
+
+  const { instance, effects: instanceEffects } = freshInstance()
+  const handle = applyInstance(instance)
+  runPass(handle, live, nodes, instanceEffects)
+  assert.equal(globalThis.document.body.querySelectorAll('[data-dsrr-action-host="1"]').length, 1, 'the row host is in the page')
+
+  // The React-rendered half of this plugin (the strip button, the overlay root)
+  // plus the nodes of a sibling plugin and of the platform.
+  const strip = new FakeNode('button')
+  strip.dataset.dsrrAction = 'rerun'
+  const overlay = new FakeNode('div')
+  overlay.dataset.dsrrOverlay = '1'
+  const sibling = new FakeNode('span')
+  sibling.className = 'dshet-action-host'
+  sibling.dataset.dshetActionHost = '1'
+  const platform = new FakeNode('button')
+  platform.className = 'platform-action'
+  for (const child of [strip, overlay, sibling, platform]) globalThis.document.body.appendChild(child)
+
+  handle.dispose()
+  // The React-owned nodes are re-checked one task later; a node that is still
+  // there by then is a genuine leftover.
+  await settle()
+
+  const owned = () =>
+    globalThis.document.body.querySelectorAll('[data-dsrr-action-host="1"], [data-dsrr-action="rerun"], [data-dsrr-overlay="1"]')
+  assert.equal(owned().length, 0, 'every node of this plugin is gone')
+  assert.equal(globalThis.document.body.childNodes.includes(sibling), true, "the sibling plugin's node is untouched")
+  assert.equal(globalThis.document.body.childNodes.includes(platform), true, "the host's own node is untouched")
+  assert.equal(bar.childNodes.includes(sibling), false, 'nothing was moved into the action bar')
+})
+
