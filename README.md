@@ -149,6 +149,12 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 ### 更新日志
 
+**0.1.21** —— 互操作加固（AI Studio 组件契约）：输入框浮层槽位号 8 → 10、隐藏归属守卫、注入节点带命名空间。
+
+- **槽位号（契约 §2）**：`conversation.input.overlay` 上 delete-turn 8 / edit-turn 9 / 本插件 10——同号会让两个浮层的先后未定义。回答行操作条保持 order 6（分配表内唯一）。
+- **隐藏归属（契约 I4）**：`setRowHidden` 只在**没有** `data-dshdt-hidden` / `data-dshet-hidden` 时才把 `display` 置回、才删掉自己的 `data-dsrr-hidden`；兄弟插件的隐藏继续生效，自己从未设过的 `display:none` 一律不碰。
+- **注入命名（契约 I3）**：用户行操作条里自建的节点带 `data-dsrr-action-host` / `data-dsrr-action`，浮层根带 `data-dsrr-overlay`；重复扫描复用同一节点，不重复插入、不动宿主与兄弟插件的节点。
+
 **0.1.20** —— 用户消息行也有重跑按钮（与回答行同一功能）。
 
 - 官方只给回答行 action 插槽；用户行沿用兄弟插件（`dsh-edit-turn`）的做法，运行时注入官方操作条（`[class*="_actions"]`，排在平台动作之后）。
@@ -412,6 +418,10 @@ button before relying on it.
 - Uninstalling the plugin keeps landed reruns but un-hides the retired rows
   (the model context is unaffected).
 - There is no undo (use the official fork for branching, not implemented).
+
+### Changelog
+
+**0.1.21** — Interop hardening for the AI Studio component contract: the input-overlay slot moves to order 10 (delete-turn 8 / edit-turn 9), a reopen never clears a sibling plugin's hide and never touches a `display:none` this plugin did not set, and the injected row nodes carry their `data-dsrr-*` namespace.
 
 ### Compatibility
 

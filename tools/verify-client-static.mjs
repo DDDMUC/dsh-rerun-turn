@@ -107,6 +107,9 @@ assert.equal(replySlot.config.locale, pluginId)
 assert.equal(typeof replySlot.entry, 'function', 'the strip entry is a component')
 assert.ok(overlaySlot, 'registers a per-session overlay controller')
 assert.equal(overlaySlot.config.id, 'rerun-turn')
+// The shared slot table: delete-turn 8, edit-turn 9, rerun-turn 10. An order
+// shared with a sibling leaves the two overlays unordered on the slot.
+assert.equal(overlaySlot.config.order, 10, 'the input overlay sits after delete-turn (8) and edit-turn (9)')
 assert.equal(typeof overlaySlot.entry, 'function', 'the overlay entry is a component')
 ok('both slot registrations land on the official names with the expected ids')
 
@@ -133,6 +136,17 @@ for (const code of hostCodes) {
   assert.ok(clientCodes.has(code), `client has copy for host error code "${code}"`)
 }
 ok(`every host failure code has client copy (${hostCodes.size} codes)`)
+
+// --- interop hardening present in the browser half ----------------------------
+
+// I4: a restore must ask the shared attribution helper before clearing
+// `display`, and the guard has to sit inside the un-hide branch.
+assert.ok(clientSource.includes('function foreignHideOn(row, own)'), 'the hide-attribution helper is present')
+assert.ok(clientSource.includes("if (foreignHideOn(row, 'dsrr') === true) return"), 'the un-hide branch keeps a sibling\'s hide')
+// I3: the nodes injected into a message row carry their namespace.
+assert.ok(clientSource.includes("host.dataset.dsrrActionHost = '1'"), 'the injected host is namespaced')
+assert.ok(clientSource.includes("button.dataset.dsrrAction = 'rerun'"), 'the injected button is namespaced')
+ok('the hide attribution and the namespaced injection are wired')
 
 // --- optional: the running instance serves these bytes ------------------------
 
