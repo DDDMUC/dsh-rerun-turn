@@ -41,3 +41,49 @@ dsh-edit-turn **0.2.12+** 的提示词编辑器里有一个「重跑」按钮：
 **改动前的纪律**：任何触及路由、`planRerun`、错误码的改动，先跑 `node --test test/contract.test.js`。
 该文件的断言经过变异验证（在 `/tmp` 副本上做，仓库文件不动）：把探测的 400 改成 404 → 2 例转红；给 `/apply`
 加一个必填 `confirmToken` → 5 例转红。也就是说，破坏上述任一形状都会被测试挡住，而不是等用户发现按钮点不动。
+## 交接：0.1.23「这条回答不支持重跑」修复（2026-10-01，Lead）
+
+**你接手时先读这一节。** 提交 `564b2b2`，版本 **0.1.23**（三处已一致），已推 origin/main。
+49 单测 / 22 契约 / 7 客户端检查全绿。
+
+### 修了什么（三个缺陷，一个症状）
+
+用户点 ↻ 得到「这条回答不支持重跑」（= 宿主 `not-rerunnable`）。用他那个会话的真实日志
+（`session-2dffdf89`，629 事件、含四次重跑）复现：修复前 32 条被广告、只有 2 条能规划；修复后 **30 条广告、30 条可规划、0 拒绝**。
+
+| # | 缺陷 | 证据 | 修法 |
+| --- | --- | --- | --- |
+| 1 | **轮次号被拆成多个 bracket，规划器取同号的第一个**。重放会开出复用轮次号却**没有用户消息**的记账 bracket，于是 `turnSpans(...).find(turn === n)` 命中那个空 bracket → `promptSeq: null` → 「the turn has no prompt to re-send」 | 该会话 turn 49/51 各两个 bracket（第一个 `promptSeq: null`） | 取**范围包含该作答**的 bracket；退路：带提示词的 → 同号第一个（`bracketOwning`） |
+| 2 | **数组下标当 seq 读**：`events[seq]`。日志首行是 header 记录（平台扫描器会剥掉），resume 的会话还继承日志头 | 同一会话里 `events[624]` 拿到的是 `seq 623 / step/start` → 「the turn prompt is not a user message」**（截图那句）** | 所有按 seq 取事件改走索引（`eventIndex`）：规划器、logTo 游走、重放区间、busy 扫描、前缀上限（那是**计数**不是下标） |
+| 3 | **广告 ≠ 承诺**：`replies[]` 广告 32 条，规划器只认 2 条 | 客户端按 `code` 渲染文案，点了必然失败 | 两侧共用 `bracketOwning` / `followToSurface` / `replacementChains`，只有一份实现；无提示词、或提示词已不在界面上的作答**不入列表** |
+
+### 你现在要做的一件事
+
+**重启宿主 + 硬刷新页面**（按你上午那次的方式）。这次改的是**宿主半侧**（`lib/index.js`），
+HMR 不会把它带进正在跑的进程 —— 不重启的话页面上仍是旧 host，症状不变。
+
+重启后三条验收（都不需要登录页面）：
+
+1. `curl -s http://127.0.0.1:3080/dsh-rerun-turn/debug` → `version` 应为 **0.1.23**；
+2. 打开那个会话，点任意一条作答 / 用户行的 ↻ → 应当开始重跑，**不再出现**「这条回答不支持重跑」；
+3. 真机再数一次每行的注入宿主数，仍应为 1（0.1.22 的约定不变）。
+
+### 复现与回归（改这一块之前必跑）
+
+~~~sh
+cd dsh-rerun-turn
+npm test && npm run verify:contract && npm run verify:client     # 49 / 22 / 7
+node --test test/turn-brackets.test.js                          # 7 例，直击本次三个缺陷
+# 任意会话的实况自检（只读，不启动 DSH）：
+node "../_aistudio-reports/check-rerun-plans.mjs" "$HOME/.dsh/sessions/<project>/<session>/session.v4.jsonl.zstd"
+~~~
+
+最后一个命令打印「广告 N 条 / 其中 M 条规划失败」。**M 必须为 0** —— 不为 0 就是本类缺陷复发，
+输出里直接给出 `turn / seq / code / message`，不必再去猜或复现一次点击。
+
+### 不要破坏的不变式（`test/turn-brackets.test.js` 已钉死）
+
+- **凡广告必可规划**：`rerunnableReplies()` 返回的每一条，`planRerun()` 都必须成功 —— 第 3 个缺陷的回归网；加新过滤条件时两侧都要过它。
+- **列表不是 seq 向量**：带 header 记录、继承日志头（首条事件 seq 远大于 0）、塞入无 seq 的填充记录 —— 三种形状下计划与广告必须与稠密数组**逐字段一致**。
+- **没有提示词的作答不许借别人的提示词**：它自己的 bracket 没有 prompt 时宁可按 `not-rerunnable` 拒绝，也不许回退到相邻 bracket 重新提问（那会把一个从未产生这条作答的问题再发一次）。
+- 跨插件契约（dsh-edit-turn → 你）在下一节，`test/contract.test.js` 16 例，同样别动。
