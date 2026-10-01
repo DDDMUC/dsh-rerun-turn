@@ -316,12 +316,21 @@ test('replayOrphanOpen recognizes only bracket-and-marker tails', () => {
 test('rerunnableReplies lists live replies with ids and turns', () => {
   const { events, seqs } = standardLog()
   const replies = P.rerunnableReplies(events, surfaceOf(events))
+  // This fixture has no system message, so the first exchange's prompt IS the
+  // surface head, and rerunning the head is refused. Advertised must equal
+  // plannable, so that reply is left out - the cross-check below pins it.
   assert.deepEqual(
     replies.map((reply) => reply.seq),
-    [seqs.a1.seq, seqs.c1.seq, seqs.c2.seq, seqs.d1.seq],
+    [seqs.c1.seq, seqs.c2.seq, seqs.d1.seq],
   )
-  assert.equal(replies[1].turn, 2)
-  assert.equal(typeof replies[1].messageId, 'string')
+  assert.equal(replies[0].turn, 2)
+  assert.equal(typeof replies[0].messageId, 'string')
+  assert.throws(
+    () => P.planRerun(events, surfaceOf(events), { seq: seqs.a1.seq }),
+    (error) => error.code === 'not-rerunnable',
+    'the head-prompt reply cannot be planned, so it was not advertised',
+  )
+  for (const reply of replies) P.planRerun(events, surfaceOf(events), { seq: reply.seq })
 })
 
 test('readPromptParts splits text, images and files', () => {
