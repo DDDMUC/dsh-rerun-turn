@@ -5,7 +5,7 @@
 ## 当前状态（2026-10-01）
 
 - 版本 **0.1.22**；`lib/index.js`、`lib/client.js`、`package.json` 三处版本号必须一致。
-- 改完必须本地全绿：`npm test && npm run verify:contract && npm run verify:client`（当前 17 单测 / 22 契约 / 7 客户端检查）。
+- 改完必须本地全绿：`npm test && npm run verify:contract && npm run verify:client`（当前 **26** 单测 / 22 契约 / 7 客户端检查；单测含 8 条客户端 DOM 用例，由 0.1.21/0.1.22 两轮加固带入 —— 2026-10-01 校正，原记 17 为过期值）。
 - 远端正本：GitHub `DDDMUC/dsh-rerun-turn`。本地有提交后请同步（git 直连在本机不通时，用 GitHub REST API 推 blobs→tree→commit→ref，**blob 请求必须带 `"encoding":"base64"`**，否则会把 base64 文本当文件存）。
 
 ## 事故记录：点不动（2026-10-01 13:5x）
