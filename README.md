@@ -149,6 +149,12 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 ### 更新日志
 
+**0.1.23** —— 修复「这条回答不支持重跑」：作答所属的轮次可能被拆成多个 bracket，规划器原先取**同号的第一个**，于是一个界面上明明可见、且自己 bracket 里有提示词的作答被拒。
+
+- **谁拥有这一轮**：重跑会重放尾部，重放开出的记账 bracket 会复用轮次号却没有任何用户消息；规划器现在取**范围包含该作答**的那个 bracket（退路依次是「带提示词的」→「同号的第一个」）。真实会话复现：一个含四次重跑的会话里，带提示词的作答全部被拒，修复后 30/32 → 30/30 可规划。
+- **不再把数组下标当 seq**：日志文件以一条 header 记录开头（平台的扫描器会剥掉它），resume 的会话还会继承日志头，所以 `events[seq]` 并不等于「seq 等于它的那条事件」。同一个会话里这个错位会把提示词读成一条 `step/start`，报「the turn prompt is not a user message」。所有「按 seq 取事件」的读取现在都走 seq 索引。
+- **广告即承诺**：`/state` 的 `replies[]` 与规划器共用同一个 bracket 判据 —— 没有提示词（或提示词已不在界面上）的应答不再出现在列表里，界面不会给出一个点了必然失败的按钮。
+
 **0.1.22** —— 修复「重新 apply 时注入节点不清理 → 幽灵按钮堆积」：行内注入前先复用已有宿主（不再删旧的再造新的），fiber dispose 时按命名空间属性清扫本插件的注入节点。
 
 - **先复用**：注入前按 `[data-dsrr-action-host="1"]` 查一次行内已有宿主，找到就复用同一个节点（WeakMap 重新指向它），绝不新建第二个；重复的旧副本（本插件自己的节点）才删。
@@ -425,6 +431,12 @@ button before relying on it.
 - There is no undo (use the official fork for branching, not implemented).
 
 ### Changelog
+
+**0.1.23** — Fixed "this reply cannot be rerun": the turn a reply reports can span more than one bracket, and the planner took the FIRST bracket with that number, so a reply that was plainly on screen with a live prompt in its own bracket was refused.
+
+- The bracket that OWNS the reply (the one whose range contains it) is now the one planned against; a prompt-bearing bracket is the fallback. Reproduced on a real session with four reruns in it, where every prompt-bearing reply was refused: 30/32 became 30/30 plannable.
+- No read treats an array position as a seq any more. The log file leads with a header record the platform's scanner strips, and a resumed log inherits its head, so `events[seq]` is not "the event with this seq" — in that same session the offset read a prompt as a `step/start` and answered "the turn prompt is not a user message".
+- What `/state` advertises is what the planner accepts: a reply whose bracket has no prompt, or whose prompt is no longer on the surface, is left out of `replies[]` instead of being offered as a button that can only fail.
 
 **0.1.22** — Fixed the ghost-button build-up on re-apply: the pass now reuses the host already in the row instead of deleting it and building another one, and a fiber dispose sweeps every node of this plugin's namespace.
 
