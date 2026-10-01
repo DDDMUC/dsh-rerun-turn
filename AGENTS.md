@@ -2,10 +2,11 @@
 
 本仓库是 DSH web 插件 **dsh-rerun-turn** 的唯一正本，经 `~/.dsh/profiles/web` 符号链接装到用户实例。改动前请先读本文件。
 
-## 当前状态（2026-10-01）
+## 当前状态（2026-10-02）
 
-- 版本 **0.1.23**；`lib/index.js`、`lib/client.js`、`package.json` 三处版本号必须一致。
-- 改完必须本地全绿：`npm test && npm run verify:contract && npm run verify:client`（当前 **49** 单测 / 22 契约 / 7 客户端检查；单测 = 18 宿主 + 8 客户端 DOM + 16 跨插件契约 + 7 轮次 bracket/seq 索引，由 0.1.21~0.1.23 三轮加固带入 —— 原记 17、26、42 均为过期值）。
+- 版本 **0.1.24**；`lib/index.js`、`lib/client.js`、`package.json` 三处版本号必须一致。
+- 改完必须本地全绿：`npm test && npm run verify:contract && npm run verify:client`（当前 **50** 单测 / 22 契约 / 7 客户端检查；单测 = 18 宿主 + 8 客户端 DOM + 16 跨插件契约 + 8 轮次 bracket/seq 索引，由 0.1.21~0.1.24 四轮加固带入 —— 原记 17、26、42、49 均为过期值）。
+- 广告与规划**必须**共用 `resolveRerunPrompt`（0.1.24 起）；详见文末。
 - 远端正本：GitHub `DDDMUC/dsh-rerun-turn`。本地有提交后请同步（git 直连在本机不通时，用 GitHub REST API 推 blobs→tree→commit→ref，**blob 请求必须带 `"encoding":"base64"`**，否则会把 base64 文本当文件存）。
   - 2026-10-01 实测补充：本机 `github.com:443` 会超时（`Failed to connect` / `curl 28 Operation too slow`），但 `api.github.com` 正常（0.3s）。走 API 时 **commit 的 `date` 必须是 ISO 8601 且保留原时区偏移**（git 存的是 `<epoch> <±HHMM>`；直接送 `1790835054 +0800` 会 422，归一化成 `Z` 会让 sha 变掉）。把 tree/parents/author/committer/message 原样回填后，API 生成的新 commit **sha 与本地完全一致**，分支不会分叉 —— 2026-10-01 的 fc4f702 就是这样推上去的。
 
