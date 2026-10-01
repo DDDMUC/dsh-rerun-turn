@@ -7,6 +7,7 @@
 - 版本 **0.1.22**；`lib/index.js`、`lib/client.js`、`package.json` 三处版本号必须一致。
 - 改完必须本地全绿：`npm test && npm run verify:contract && npm run verify:client`（当前 **26** 单测 / 22 契约 / 7 客户端检查；单测含 8 条客户端 DOM 用例，由 0.1.21/0.1.22 两轮加固带入 —— 2026-10-01 校正，原记 17 为过期值）。
 - 远端正本：GitHub `DDDMUC/dsh-rerun-turn`。本地有提交后请同步（git 直连在本机不通时，用 GitHub REST API 推 blobs→tree→commit→ref，**blob 请求必须带 `"encoding":"base64"`**，否则会把 base64 文本当文件存）。
+  - 2026-10-01 实测补充：本机 `github.com:443` 会超时（`Failed to connect` / `curl 28 Operation too slow`），但 `api.github.com` 正常（0.3s）。走 API 时 **commit 的 `date` 必须是 ISO 8601 且保留原时区偏移**（git 存的是 `<epoch> <±HHMM>`；直接送 `1790835054 +0800` 会 422，归一化成 `Z` 会让 sha 变掉）。把 tree/parents/author/committer/message 原样回填后，API 生成的新 commit **sha 与本地完全一致**，分支不会分叉 —— 2026-10-01 的 fc4f702 就是这样推上去的。
 
 ## 事故记录：点不动（2026-10-01 13:5x）
 
