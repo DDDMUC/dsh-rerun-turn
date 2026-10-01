@@ -88,3 +88,22 @@ node "../_aistudio-reports/check-rerun-plans.mjs" "$HOME/.dsh/sessions/<project>
 - **列表不是 seq 向量**：带 header 记录、继承日志头（首条事件 seq 远大于 0）、塞入无 seq 的填充记录 —— 三种形状下计划与广告必须与稠密数组**逐字段一致**。
 - **没有提示词的作答不许借别人的提示词**：它自己的 bracket 没有 prompt 时宁可按 `not-rerunnable` 拒绝，也不许回退到相邻 bracket 重新提问（那会把一个从未产生这条作答的问题再发一次）。
 - 跨插件契约（dsh-edit-turn → 你）在下一节，`test/contract.test.js` 16 例，同样别动。
+
+## 交接：0.1.24「广告≠承诺」的最后一个形状（2026-10-02，Lead）
+
+0.1.23 之后，`check-rerun-plans.mjs` 在 **`session-e81f9424`（turn 31 / seq 3979）** 仍有 M=1：
+作答在界面上，但提示词被 `dsh-delete-turn` 两步替换——用户载体 → 最终 **`system/message`** 载体——
+链解析落在界面上却**不是 `user/message`**。广告侧只验「活节点存在」，规划侧还验「活节点是用户消息」，两处判据仍分叉。
+
+修法：抽出一个**唯一的** `resolveRerunPrompt(bySeq, nodeIndex, brackets, revisions, head, turn, targetSeq)`
+（`lib/index.js`，`followToSurface` 之后），返回 `{ reason: null, promptSeq, span }` 或
+`{ reason: 'no-prompt' | 'retired' | 'not-user' | 'head' }`。`planRerun` 与 `rerunnableReplies` 都只走它，
+各自把 reason 映射成稳定错误码 / 静默排除。**凡广告必可规划**从此由构造保证，不再靠两段相似代码同步。
+
+- 回归：`test/turn-brackets.test.js` 新增「提示词 → 兄弟用户载体 → system 载体」样例（链解析落在非用户节点 → 不广告、规划拒绝）。
+- 顺带修正：`logic.test.js` 的 `standardLog` 没有 system 头，首条用户消息即 surface 头；`planRerun` 本就拒绝重跑头，
+  旧的广告却发了它——该测试预期已改为 `[c1,c2,d1]` 并加了「每条广告都能规划」的交叉断言。
+- 验收：8 个真实会话（含 10953 事件）`check-rerun-plans.mjs` 全部 **M=0**；50 单测 / 22 契约 / 7 客户端全绿。
+
+**新增不变式**：广告与规划**必须**共用 `resolveRerunPrompt`。给 `rerunnableReplies` 加任何新过滤，
+都要问「`planRerun` 会不会因为另一条判据拒绝它」，并把判据挪进该函数，而不是并排再加一个 `if`。

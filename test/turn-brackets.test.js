@@ -200,3 +200,71 @@ test('a gap in the seqs does not talk the planner into a stranger event', () => 
     'the planner refuses instead of planning a stranger',
   )
 })
+
+test('a prompt retired to a non-user carrier is neither advertised nor plannable', () => {
+  // The real shape (session-e81f9424, turn 31): dsh-delete-turn retired the
+  // prompt to its own user/message carrier, then retired THAT carrier to a
+  // `system/message` node which stays on the surface. The reply is still on
+  // screen, but no prompt is left to re-send - so the ↻ must not appear, or it
+  // answers "this reply cannot be rerun". The advertisement used to accept any
+  // live node, which is exactly how that button got offered.
+  let seq = 0
+  const events = []
+  const next = (type, data, extra = {}) => ({ type, seq: seq++, time: 1_700_000_000_000, data, ...extra })
+  const push = (event) => {
+    events.push(event)
+    return event
+  }
+  push(
+    next(
+      'system/message',
+      { message: { id: uid('m'), role: 'system', content: [textBlock('system prompt')], source: { kind: 'system-prompt' } } },
+      { surfaceOp: 'append' },
+    ),
+  )
+  push(next('turn/start', { turn: 1 }))
+  push(next('step/start', { turn: 1, step: 1 }))
+  const p = push(next('user/message', { id: uid('m'), role: 'user', content: [textBlock('P')], source: { kind: 'user' } }, { surfaceOp: 'append' }))
+  const a = push(
+    next(
+      'assistant/message',
+      {
+        turn: 1,
+        step: 1,
+        message: { id: uid('m'), role: 'assistant', content: [textBlock('A')], source: { kind: 'model' } },
+        stream: [],
+        usage: { inputTokens: 1, outputTokens: 2 },
+      },
+      { surfaceOp: 'append' },
+    ),
+  )
+  push(next('step/end', { turn: 1, step: 1 }))
+  push(next('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  // Hop 1: dsh-delete-turn replaces the prompt with its own user carrier.
+  const deleted = push(
+    next(
+      'user/message',
+      { id: uid('m'), role: 'user', content: [textBlock('[deleted]')], source: { kind: 'plugin:dsh-delete-turn' } },
+      { surfaceOp: { op: 'replace', startSeq: p.seq, endSeq: p.seq } },
+    ),
+  )
+  // Hop 2: it replaces that carrier with its system-prompt carrier, which is
+  // the node that stays on the surface.
+  const carrier = push(
+    next(
+      'system/message',
+      { message: { id: uid('m'), role: 'system', content: [], source: { kind: 'system-prompt', plugin: 'dsh-delete-turn' } } },
+      { surfaceOp: { op: 'replace', startSeq: deleted.seq, endSeq: deleted.seq } },
+    ),
+  )
+  const surface = surfaceOf(events)
+  assert.equal(surface.includes(a.seq), true, 'the reply is still on the surface')
+  assert.equal(surface.includes(carrier.seq), true, 'the final carrier is the live node')
+  const advertised = P.rerunnableReplies(events, surface).map((reply) => reply.seq)
+  assert.equal(advertised.includes(a.seq), false, 'no re-sendable prompt, so no offer')
+  assert.throws(
+    () => P.planRerun(events, surface, { seq: a.seq }),
+    (error) => error.code === 'not-rerunnable' && /not a user message/.test(error.message),
+    'the planner refuses the same reply the advertisement left out',
+  )
+})
