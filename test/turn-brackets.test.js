@@ -268,3 +268,102 @@ test('a prompt retired to a non-user carrier is neither advertised nor plannable
     'the planner refuses the same reply the advertisement left out',
   )
 })
+/**
+ * A turn whose reply never finalized: the shape a user reaches by pressing stop,
+ * or by a turn that failed. Its bracket has a prompt and a turn/end, and no
+ * assistant/message anywhere - so there is nothing to replace and no reply seq to
+ * address. Reproduced from a real session (2026-10-03, turn 40: turn/start,
+ * assistant/attempt, turn/end aborted, and /state advertising nothing at all).
+ */
+function stoppedTurnLog() {
+  let seq = 0
+  const events = []
+  const next = (type, data, extra = {}) => ({ type, seq: seq++, time: 1_700_000_000_000, data, ...extra })
+  const push = (event) => {
+    events.push(event)
+    return event
+  }
+  const user = (text) =>
+    push(next('user/message', { id: uid('m'), role: 'user', content: [textBlock(text)], source: { kind: 'user' } }, { surfaceOp: 'append' }))
+  const assistant = (turn, step, text) =>
+    push(
+      next(
+        'assistant/message',
+        {
+          turn,
+          step,
+          message: { id: uid('m'), role: 'assistant', content: [textBlock(text)], source: { kind: 'model' } },
+          stream: [],
+          usage: { inputTokens: 1, outputTokens: 2 },
+        },
+        { surfaceOp: 'append' },
+      ),
+    )
+
+  push(
+    next(
+      'system/message',
+      { message: { id: uid('m'), role: 'system', content: [textBlock('system prompt')], source: { kind: 'system-prompt' } } },
+      { surfaceOp: 'append' },
+    ),
+  )
+
+  push(next('turn/start', { turn: 1 }))
+  push(next('step/start', { turn: 1, step: 1 }))
+  const answered = user('the answered question')
+  const answer = assistant(1, 1, 'the answer')
+  push(next('step/end', { turn: 1, step: 1 }))
+  push(next('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+
+  push(next('turn/start', { turn: 2 }))
+  push(next('step/start', { turn: 2, step: 1 }))
+  const stopped = user('the stopped question')
+  push(next('assistant/attempt', { turn: 2, step: 1 }))
+  push(next('step/end', { turn: 2, step: 1 }))
+  push(next('turn/end', { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } }))
+
+  return { events, seqs: { answered, answer, stopped, turn: 2 } }
+}
+
+test('a turn whose reply never finalized is rerunnable through its own prompt', () => {
+  const { events, seqs } = stoppedTurnLog()
+  const surface = surfaceOf(events)
+  const advertised = P.rerunnableReplies(events, surface)
+  const entry = advertised.find((reply) => reply.turn === seqs.turn)
+  assert.ok(entry, 'the stopped turn is offered - it used to offer nothing at all')
+  assert.equal(entry.seq, seqs.stopped.seq, 'it is addressed at its prompt, having no reply')
+  assert.equal(entry.messageId, null, 'there is no reply to name')
+
+  const plan = P.planRerun(events, surface, { seq: seqs.stopped.seq })
+  assert.equal(plan.promptSeq, seqs.stopped.seq, 'the rerun re-sends that prompt')
+  assert.equal(plan.prompt.text, 'the stopped question')
+  assert.equal(plan.startSeq, seqs.stopped.seq, 'the window opens at the prompt')
+  // The 0.1.24 invariant, for this shape too.
+  for (const reply of advertised) P.planRerun(events, surface, { seq: reply.seq })
+})
+
+test('a prompt is not an address when its turn does have a reply', () => {
+  const { events, seqs } = stoppedTurnLog()
+  // Turn 1 has an answer. Its row addresses that answer, so a prompt is an address
+  // only for a turn that produced none - the rule that was already pinned before
+  // this shape existed, and that must not widen by accident.
+  assert.throws(
+    () => P.planRerun(events, surfaceOf(events), { seq: seqs.answered.seq }),
+    (error) => error.code === 'not-rerunnable' && /targets a model reply/.test(error.message),
+  )
+  assert.equal(
+    P.rerunnableReplies(events, surfaceOf(events)).find((reply) => reply.turn === 1).seq,
+    seqs.answer.seq,
+    'the answered turn is still addressed at its reply, not its prompt',
+  )
+})
+
+test('a stopped turn stays addressable when the event list is not dense', () => {
+  const { events, seqs } = stoppedTurnLog()
+  const withHeader = [{ type: 'session', version: 4, id: 'session-x', createdAt: 1 }, ...events]
+  const surface = surfaceOf(withHeader)
+  const entry = P.rerunnableReplies(withHeader, surface).find((reply) => reply.turn === seqs.turn)
+  assert.equal(entry.seq, seqs.stopped.seq, 'the prompt seq survives the header shift')
+  assert.equal(P.planRerun(withHeader, surface, { seq: seqs.stopped.seq }).promptSeq, seqs.stopped.seq)
+})
+

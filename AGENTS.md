@@ -108,3 +108,41 @@ node "../_aistudio-reports/check-rerun-plans.mjs" "$HOME/.dsh/sessions/<project>
 
 **新增不变式**：广告与规划**必须**共用 `resolveRerunPrompt`。给 `rerunnableReplies` 加任何新过滤，
 都要问「`planRerun` 会不会因为另一条判据拒绝它」，并把判据挪进该函数，而不是并排再加一个 `if`。
+
+## 交接：0.1.25「没有作答的轮次也要有 ↻」（2026-10-04，Lead）
+
+用户报告：点编辑器里的「重跑」得到「已保存，但这一轮没有可重跑的作答。」，并要求「任何时候都不能没有 ↻」。
+
+**根因**：`rerunnableReplies` 只遍历 `assistant/message`。一轮如果没有定稿作答（用户按了停止、或那一轮失败），
+它既不在 `replies[]` 里，于是三处入口一起消失：
+
+- 回答行的 ↻ 走 `repliesByMessage`（按 messageId）→ 没有；
+- 用户行的 ↻ 走 `lastReplyForTurn(turn)`（`lib/client.js:670-689`）→ 找不到该轮条目 → 同样没有；
+- `dsh-edit-turn` 编辑器的「重跑」按同一份 `/state` 判断 → 直接提示 `rerun-nothing`。
+
+**修法（两处，都在宿主半侧）**：
+
+1. `resolveTarget` 允许 `user/message` 作为目标（原先只许 `assistant/message`）；
+2. `planRerun` 里限定：提示词目标**仅**在该轮没有可重跑回答时才接受，且必须**就是该轮的活提示词**
+   （`target.seq === livePromptSeq`）。判定走新抽出的 `rerunnableReplyOf`，与广告侧同一份谓词，
+   不让「广告」与「规划」各写一段相似代码；
+3. `rerunnableReplies` 末尾补一遍：给**没有广告回答、但有活用户提示词**的轮次发一条
+   `{ seq: <提示词 seq>, turn, messageId: null }`。
+
+**为什么这是安全的**：`planRerun` 本来就只用 `target.seq` 定位轮次，重跑窗口一直是从**提示词**起算的 ——
+所以「按提示词寻址」产生的计划与「按回答寻址」逐字段一致，没有引入新的重放语义。`messageId: null` 也让
+回答行插槽不会误取（它按 messageId 查表）。客户端**无需改动**。
+
+**不变式（已钉）**：
+
+- 旧规则不许放宽：**该轮有可重跑回答时，提示词不是合法地址**（`logic.test.js:146` 的既有断言保持原样，
+  `turn-brackets.test.js` 另加一例钉住）。
+- 新形状同样过「凡广告必可规划」。
+
+**验收**：53 单测 / 22 契约 / 7 客户端全绿；负向验证（还原两处改动 → 恰好两条新测试转红）；
+`check-rerun-plans.mjs` 在当前会话 **广告 95 条全部可规划（M=0）**；真实数据里 `session-2dffdf89` 的
+turn 48/50（被停止但提示词还在）从「无入口」变为「有入口且可规划」。
+
+**仍未覆盖（有意）**：提示词**已被删除**（被 `dsh-delete-turn` 替换掉）的轮次依旧没有 ↻。重发一个用户
+已经删掉的提示词等于撤销那次删除，与 delete-turn 的语义冲突 —— 这是产品决定，不是缺陷。当前会话的
+turn 40（22:43 被停止的那一轮）正是这种：它的提示词 seq 7102 已被替换为删除载体 7106。
