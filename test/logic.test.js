@@ -160,24 +160,96 @@ test('planRerun refuses file-attachment prompts', () => {
   assert.throws(() => P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq }), /file attachments/)
 })
 
-test('buildShadowWrites wraps an empty system carrier in a bookkeeping turn', () => {
+test('buildShadowWrites lands one empty user carrier and opens no turn', () => {
   const { events, seqs } = standardLog()
   const plan = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
-  const writes = P.buildShadowWrites(plan, 5, 'rerun-1', 'req-1')
-  assert.deepEqual(
-    writes.map((write) => write.type),
-    ['turn/start', 'step/start', 'system/message', 'step/end', 'turn/end'],
-  )
-  const carrier = writes[2]
-  assert.equal(carrier.data.turn, 5)
+  const writes = P.buildShadowWrites(plan, 'rerun-1', 'req-1')
+  // ONE write, no turn bracket: the carrier must not spend a turn number on
+  // bookkeeping (an empty "completed" strip in the conversation view and a hole
+  // in the trajectory numbering), and it must not have to be synced into the
+  // agent loop's process-local turn counter.
+  assert.deepEqual(writes.map((write) => write.type), ['user/message'])
+  const carrier = writes[0]
   assert.deepEqual(carrier.surfaceOp, { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq })
   assert.deepEqual(carrier.sourceEventSeqs, plan.shadowed)
-  assert.equal(carrier.data.message.content.length, 0, 'empty content projects to no model message')
-  assert.equal(carrier.data.message.role, 'system')
-  assert.equal(carrier.data.message.source.kind, 'system-prompt', 'the format only admits system-prompt sources on system messages')
-  assert.equal(carrier.data.message.source.plugin, 'dsh-rerun-turn')
-  assert.equal(carrier.data.message.source.rerunId, 'rerun-1')
-  assert.equal(carrier.data.message.source.carrierTurn, 5)
+  assert.equal(carrier.data.role, 'user')
+  assert.equal(carrier.data.content.length, 0, 'empty content is dropped by every shipped LLM adapter')
+  assert.equal(carrier.data.source.kind, 'plugin:dsh-rerun-turn', 'a plugin carrier is never read as a human prompt')
+  assert.equal(carrier.data.source.rerunId, 'rerun-1')
+  assert.equal(carrier.data.source.promptRequestId, 'req-1')
+  assert.equal(carrier.data.turn, undefined, 'a user carrier carries no turn/step coordinate')
+  assert.equal(P.isRerunCarrier(carrier), true)
+  assert.equal(P.isSilentPluginCarrier(carrier), true)
+  // The write is legal exactly as the host lands it: replaying it into a log
+  // keeps the surface and the turn numbering unchanged.
+  const carrierSeq = events.length
+  const landed = [...events, { ...carrier, seq: carrierSeq, time: 1 }]
+  const beforeNodes = P.foldSurface(events).nodes
+  const startIdx = beforeNodes.indexOf(plan.startSeq)
+  assert.deepEqual(
+    P.foldSurface(landed).nodes,
+    [...beforeNodes.slice(0, startIdx), carrierSeq],
+    'the whole window collapses into the one carrier node',
+  )
+  assert.deepEqual(P.turnSpans(landed), P.turnSpans(events), 'no turn bracket appears')
+  assert.equal(P.foldSurface(landed).nodes[0], beforeNodes[0], 'the surface head is untouched')
+  assert.deepEqual(P.lastTurnOf(landed), P.lastTurnOf(events), 'the turn numbering does not move either')
+})
+
+test('the turn-free carrier is what keeps bookkeeping out of the turn numbering', () => {
+  const { events, seqs } = standardLog()
+  const plan = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
+  const carrier = P.buildShadowWrites(plan, 'rerun-1', 'req-1')[0]
+  const withNew = [...events, { ...carrier, seq: events.length, time: 1 }]
+  const before = P.turnSpans(events)
+
+  // The new shape: the shadow lands as one surface event and the turn
+  // numbering does not move, so the regenerated turn the loop opens next is
+  // the log's own next turn and nothing is spent on bookkeeping.
+  assert.deepEqual(P.turnSpans(withNew), before, 'the shadow opens no bracket')
+  assert.equal(P.lastTurnOf(withNew), P.lastTurnOf(events))
+
+  // The control is 0.1.14-0.1.25's shape: the same shadow written as an empty
+  // system/message inside its own turn. That turn is the empty shell the user
+  // reported - a bracket with no prompt, no reply and nothing on screen, which
+  // also consumes a turn number (the trajectory view shows the hole).
+  const legacyTurn = P.lastTurnOf(events) + 1
+  const legacy = [
+    ...events,
+    { type: 'turn/start', seq: events.length, time: 1, data: { turn: legacyTurn } },
+    { type: 'step/start', seq: events.length + 1, time: 1, data: { turn: legacyTurn, step: 1 } },
+    {
+      type: 'system/message',
+      seq: events.length + 2,
+      time: 1,
+      surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq },
+      sourceEventSeqs: plan.shadowed,
+      data: {
+        turn: legacyTurn,
+        step: 1,
+        message: {
+          id: uid('m'),
+          role: 'system',
+          content: [],
+          source: { kind: 'system-prompt', plugin: 'dsh-rerun-turn', rerunBy: 'dsh-rerun-turn', rerunId: 'rerun-1' },
+        },
+      },
+    },
+    { type: 'step/end', seq: events.length + 3, time: 1, data: { turn: legacyTurn, step: 1 } },
+    { type: 'turn/end', seq: events.length + 4, time: 1, data: { turn: legacyTurn, reason: { kind: 'completed' } } },
+  ]
+  const legacySpans = P.turnSpans(legacy)
+  assert.equal(P.lastTurnOf(legacy), legacyTurn, 'the legacy carrier bought a turn number')
+  assert.equal(legacySpans.length, before.length + 1)
+  assert.deepEqual(
+    { promptSeq: legacySpans[legacySpans.length - 1].promptSeq, replies: legacySpans[legacySpans.length - 1].replies },
+    { promptSeq: null, replies: 0 },
+    'and that turn holds neither a prompt nor a reply - the bare "completed" strip',
+  )
+  // Both shapes are recognised as this plugin's carrier, so chained reruns and
+  // ledgers read either one.
+  assert.equal(P.isRerunCarrier(legacy[events.length + 2]), true)
+  assert.equal(P.isRerunCarrier({ ...carrier, seq: events.length, time: 1 }), true)
 })
 
 test('buildReplayWrites renumbers turns, marks copies, and drops usage and streams', () => {
@@ -239,7 +311,7 @@ test('rerunLedger tracks completion through copies and the rpcId prompt', () => 
   const rerunId = 'rerun-1'
   const promptRequestId = 'req-1'
   let working = [...events]
-  for (const write of P.buildShadowWrites(plan, 5, rerunId, promptRequestId)) {
+  for (const write of P.buildShadowWrites(plan, rerunId, promptRequestId)) {
     working = [...working, { ...write, seq: working.length, time: 1, ...(write.surfaceOp === undefined ? {} : { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs }) }]
   }
   // Prompt landed via rpcId; nothing replayed yet.
@@ -411,7 +483,7 @@ test('rerunLedger hides originals whose live stand-in the rerun retired', () => 
   const plan = P.planRerun(log, surfaceOf(log), { seq: seqs.c1.seq })
   log = [
     ...log,
-    ...P.buildShadowWrites(plan, 5, 'run-1', 'req-1').map((write, index) => ({
+    ...P.buildShadowWrites(plan, 'run-1', 'req-1').map((write, index) => ({
       ...write,
       seq: log.length + index,
       time: 1,
@@ -459,7 +531,7 @@ test('rerunLedger never demands a copy for a shadowed system message', () => {
   const rerunId = 'rerun-1'
   const promptRequestId = 'req-1'
   let working = [...events]
-  for (const write of P.buildShadowWrites(plan, 4, rerunId, promptRequestId)) {
+  for (const write of P.buildShadowWrites(plan, rerunId, promptRequestId)) {
     working = [
       ...working,
       { ...write, seq: working.length, time: 1, ...(write.surfaceOp === undefined ? {} : { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs }) },
@@ -507,7 +579,7 @@ test('retiredTurnList lists fully retired turns; carriers and live turns never a
   const rerunId = 'rerun-1'
   const promptRequestId = 'req-1'
   let working = [...events]
-  for (const write of P.buildShadowWrites(plan, 5, rerunId, promptRequestId)) {
+  for (const write of P.buildShadowWrites(plan, rerunId, promptRequestId)) {
     working = [
       ...working,
       { ...write, seq: working.length, time: 1, ...(write.surfaceOp === undefined ? {} : { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs }) },
@@ -645,7 +717,7 @@ test('a rerun over a twice-rewritten prompt reads the latest wording and retires
 
   const rerunId = 'run-1'
   const promptRequestId = 'req-1'
-  for (const write of P.buildShadowWrites(plan, 5, rerunId, promptRequestId)) {
+  for (const write of P.buildShadowWrites(plan, rerunId, promptRequestId)) {
     log = [
       ...log,
       { ...write, seq: log.length, time: 1, ...(write.surfaceOp === undefined ? {} : { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs }) },
