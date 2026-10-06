@@ -125,12 +125,17 @@ assert(
 const after = await call('GET', `/dsh-rerun-turn/dev/derived?sessionId=${encodeURIComponent(sessionId)}`)
 assert(after.status === 200 && after.body.ok, 'the derived context reads after the rerun')
 const derived = after.body.derived
-// The rerun's bookkeeping carrier must never reach the model: no blank or
-// zero-width user message in the derived input.
+// The rerun's bookkeeping carrier must never reach the model. The carrier IS an
+// empty user message on the surface (that is how a rerun retires a window), and
+// /dev/derived reports the request the adapters would send - where an empty user
+// message is skipped (dsh-llm-deepseek: `role === "user" && content.length === 0`;
+// pi-ai: `dsh-delete-turn:skip-empty-user`). So: no blank or zero-width user
+// message in the derived input, and the carrier itself opened no turn.
 const blankMessages = derived.filter(
   (entry) => entry.role === 'user' && (entry.text || '').replace(/[\u200B\uFEFF\s]/g, '') === '',
 )
 assert(blankMessages.length === 0, 'no blank or zero-width user message reaches the model')
+assert(finalState.reruns[0].carrierTurn === null, 'the carrier opened no bookkeeping turn')
 const userIndexes = derived
   .map((entry, index) => (entry.role === 'user' && entry.text.includes('TOKEN-') ? index : -1))
   .filter((index) => index >= 0)

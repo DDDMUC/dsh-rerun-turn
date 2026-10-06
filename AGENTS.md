@@ -2,11 +2,12 @@
 
 本仓库是 DSH web 插件 **dsh-rerun-turn** 的唯一正本，经 `~/.dsh/profiles/web` 符号链接装到用户实例。改动前请先读本文件。
 
-## 当前状态（2026-10-02）
+## 当前状态（2026-10-06）
 
-- 版本 **0.1.24**；`lib/index.js`、`lib/client.js`、`package.json` 三处版本号必须一致。
-- 改完必须本地全绿：`npm test && npm run verify:contract && npm run verify:client`（当前 **50** 单测 / 22 契约 / 7 客户端检查；单测 = 18 宿主 + 8 客户端 DOM + 16 跨插件契约 + 8 轮次 bracket/seq 索引，由 0.1.21~0.1.24 四轮加固带入 —— 原记 17、26、42、49 均为过期值）。
-- 广告与规划**必须**共用 `resolveRerunPrompt`（0.1.24 起）；详见文末。
+- 版本 **0.1.26**；`lib/index.js`、`lib/client.js`、`package.json` 三处版本号必须一致。
+- 改完必须本地全绿：`npm test && npm run verify:contract && npm run verify:client`（当前 **56** 单测 / **29** 契约 / 7 客户端检查；单测 = 宿主 + 客户端 DOM + 跨插件契约 + 轮次 bracket/seq 索引 + 载体不占轮次，由 0.1.21~0.1.26 多轮加固带入 —— 原记 17、26、42、49、50、53 均为过期值）。
+- 广告与规划**必须**共用 `resolveRerunPrompt`（0.1.24 起）；该函数现在还负责「静默载体不是提示词」（0.1.26 起）。详见文末。
+- **载体不占轮次**（0.1.26 起，回到 0.1.1 的设计）：遮蔽载体是一条空 `user/message`（`content: []`、`source.kind = plugin:dsh-rerun-turn`），不写 turn/step 括号、不调 `syncLoopTurn`。0.1.14-0.1.25 的"空 system/message + 合成簿记轮"会让每重跑一次多一个没有内容的轮次（屏幕上是空的「已完成」条，轨迹视图跳号），不要再改回去；详见文末交接。
 - 远端正本：GitHub `DDDMUC/dsh-rerun-turn`。本地有提交后请同步（git 直连在本机不通时，用 GitHub REST API 推 blobs→tree→commit→ref，**blob 请求必须带 `"encoding":"base64"`**，否则会把 base64 文本当文件存）。
   - 2026-10-01 实测补充：本机 `github.com:443` 会超时（`Failed to connect` / `curl 28 Operation too slow`），但 `api.github.com` 正常（0.3s）。走 API 时 **commit 的 `date` 必须是 ISO 8601 且保留原时区偏移**（git 存的是 `<epoch> <±HHMM>`；直接送 `1790835054 +0800` 会 422，归一化成 `Z` 会让 sha 变掉）。把 tree/parents/author/committer/message 原样回填后，API 生成的新 commit **sha 与本地完全一致**，分支不会分叉 —— 2026-10-01 的 fc4f702 就是这样推上去的。
 
@@ -146,3 +147,75 @@ turn 48/50（被停止但提示词还在）从「无入口」变为「有入口�
 **仍未覆盖（有意）**：提示词**已被删除**（被 `dsh-delete-turn` 替换掉）的轮次依旧没有 ↻。重发一个用户
 已经删掉的提示词等于撤销那次删除，与 delete-turn 的语义冲突 —— 这是产品决定，不是缺陷。当前会话的
 turn 40（22:43 被停止的那一轮）正是这种：它的提示词 seq 7102 已被替换为删除载体 7106。
+（0.1.26 起这条由 `resolveRerunPrompt` 的 `'carrier'` 分支机械保证：`plugin:` 开头且内容为空的 user
+载体不再被当作可重发的提示词，即使它是链解析落点。）
+
+## 交接：0.1.26「载体不占轮次」（2026-10-06，Lead）
+
+**现象（真机）**：同一条提问反复点 ↻，屏幕上出现空壳 ——
+
+```
+[用户] Reply with exactly: FLICK   03:27 [复制][删除][↻][编辑]
+  已完成，用时 2 秒
+  FLICK                             ← 真正的重跑结果
+  已完成，用时 1 秒                  ← 空壳：下面什么都没有
+```
+
+**日志证据**：`session-5ce30467-535c-4b90-98b8-f206a33a04ee`（真机会话，已导出到
+`~/.dsh/sessions/--Users-337mu-Documents-Default~0020Project--/`）。turn 3/5/7/9/11/13 是真问答，
+turn 4/6/8/10/12/14 每个只有一条 `system/message`（`source.kind = system-prompt`、`plugin =
+dsh-rerun-turn`、`content: []`）——对话视图不画 system 消息，于是只剩「已完成」条；轨迹视图也不产生
+行，轮号出现 4/6/8/10/12 的空洞。
+
+**根因（为什么载体当年必须占轮次）**：格式里只有 `user/message` 可以在**没有打开中的 turn/step** 时被
+读取；`system/message`/`developer/message` 属于 `STEP_EVENT_TYPES`（`requireStep`）、
+`assistant/message` 走同一检查（`tool()` 里的 `requireStep`）、替换型 `tool/result` 要
+`requireTurn`，而 `turn/start` 必须等于 `nextTurn`、已关闭的轮次回不去。所以 0.1.14 想让载体"完全
+不进模型输入"（空 system 消息被 `deriveMessages()` 丢弃）时，就**只能**开一个轮次把它装进去。
+
+**修法**：载体回到**不占轮次**的空 `user/message`（`buildShadowWrites(plan, rerunId,
+promptRequestId)` 只返回一条写）。"模型看不到"由另一条官方保证：两个适配器都在发请求前丢掉空 user 消息
+（`dsh-llm-deepseek/lib/index.js`：`if (message.role === "user" && content.length === 0) continue`；
+pi-ai 同款，注释就叫 `dsh-delete-turn:skip-empty-user`）。内容必须是**空数组**——零点宽空格是文本，
+会进模型输入（0.1.13 的实测结论）。
+
+**连带改动**（都在宿主半侧，客户端只有一处）：
+
+1. `resolveRerunPrompt` 新增 `'carrier'` 拒绝：`source.kind` 以 `plugin:` 开头且 `content` 为空的
+   user 消息是**静默载体**，不是提示词（`isSilentPluginCarrier`）。dsh-edit-turn 的改写保持
+   `kind: 'user'` + `editedBy`（带新文本），不受影响，仍然可重跑。
+2. `buildReplayWrites` + `rerunLedger.expectsCopy` 同步跳过**本插件自己的载体**（`isRerunCarrier`）：
+   记账不是对话，复制它只会凭空多一个空 user 节点。**两处必须同时改**，否则账本会永远认为缺一个副本
+   ⇒ `/state` 每次轮询都重放一批（0.1.16 的放大事故）。
+3. `applyRerun` 删掉 `carrierTurn` 计算与那一处 `syncLoopTurn`（重放之后的那一处保留）。
+4. `/dev/derived` 报"适配器真正发出的请求"（去掉空 user/developer 消息），live e2e 的
+   「没有空白 user 消息进模型」断言因此仍然成立。
+5. 客户端 `keyTurnOf` 除了从 flow key 里抠轮号，也读平台自己的 `data-chat-turn`：DSH 现在按**节点 kind**
+   作 key（`turn-tail`、`["turn-tail","response"]`），只读 key 会让旧日志（和 `retiredTurns`）的空条
+   留在屏幕上。
+
+**不变式（已钉）**：
+
+- 遮蔽**不买轮号**：`turnSpans` / `lastTurnOf` 在遮蔽前后逐字段相同（`logic.test.js`「载体不占轮次」一
+  例里，对照组是 0.1.25 的 5 条写，断言它恰好开出一个 prompt/reply 都为空的 bracket）。
+- 全日志**没有任何"只装载体、没有内容"的轮次**（契约校验器 `emptyTurnBrackets()`，用真 `Session` 的
+  `deriveEventMessage` 判定可见性；被 `retiredTurns` 记账的旧轮不算）。
+- 旧日志的读路径**逐字段不变**：`session-5ce30467` 在新旧代码下 `foldSurface`/`rerunLedger`/
+  `retiredTurnList`/`rerunnableReplies` 输出 diff 为空。
+
+**验收（复现命令）**：
+
+~~~sh
+cd dsh-rerun-turn
+npm test && npm run verify:contract && npm run verify:client      # 56 / 29 / 7
+
+# 真机校验器（0.2.0-rc.2）跑真实会话：原日志照读 + 在它上面跑一次新形状重跑
+node /tmp/verify-real-session.mjs      # 需要先把会话解成 /tmp/session-5ce30467.jsonl（多帧 zstd）
+
+# 负向验证：/tmp 副本还原源码（保留新断言）→ 恰好 4 条新增用例转红、契约校验器第一条新断言就红（"the shadow is exactly one event"）
+#   /tmp/dsh-rerun-turn-negative   （HEAD 的 lib/*  + 新测试，调用点改回 4 参）
+#   /tmp/dsh-rerun-turn-baseline   （全 HEAD：53 / 22 / 7，用作 harness 自证）
+~~~
+
+**如果你要把载体改回开轮次**：先读上面「根因」——除了空洞和空壳，你还要把 `syncLoopTurn` 加回来，并且在
+"再生成轮号 = 载体轮 + 1"上重新验证冷读；这是 0.1.0 事故的复现路径。

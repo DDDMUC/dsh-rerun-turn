@@ -152,8 +152,15 @@ function firstTurn(session, prompt, reply) {
 }
 
 // Derived context as a compact, comparable shape: `role:text` per message.
+// An EMPTY user message is this plugin's (and its siblings') silent replacement
+// carrier: it is on the surface, and `deriveMessages()` returns it, but no
+// shipped adapter puts it on the wire - dsh-llm-deepseek skips
+// `role === "user" && content.length === 0`, and the pi-ai adapter has the same
+// skip under the name `dsh-delete-turn:skip-empty-user`. So the derivation is
+// rendered as `user:<carrier>` and the wire view drops exactly those rows.
 function derivedShape(session) {
   return session.deriveMessages().map((message) => {
+    if (message.role === 'user' && message.content.length === 0) return 'user:<carrier>'
     const first = message.content[0]
     const text =
       first && first.type === 'text'
@@ -165,6 +172,61 @@ function derivedShape(session) {
           : `<${first ? first.type : 'empty'}>`
     return `${message.role}:${text}`
   })
+}
+
+/** What the provider actually receives: the derived shape without the carriers. */
+function modelShape(session) {
+  return derivedShape(session).filter((row) => row !== 'user:<carrier>')
+}
+
+/**
+ * Turn numbers on screen that hold nothing a viewer could see.
+ *
+ * A turn exists in the log as a bracket, but the viewer draws it from its
+ * surface nodes: a node that derives no message (DSH drops empty system,
+ * developer and assistant messages) or that the adapters drop on the way out
+ * (an empty user message is the silent carrier) leaves the turn showing an
+ * empty "completed" strip and its number a hole in the trajectory view. The
+ * carrier must never create one - that is the whole point of the turn-free
+ * shape.
+ *
+ * A turn the ledger reports as RETIRED is excluded: retiring a window is the
+ * rerun working as designed, and the client drops those rows by turn number
+ * (`retiredTurns`). What must never happen - and what this checks - is an empty
+ * turn nobody accounted for, which is exactly the bare "completed" strip the
+ * carrier turn used to leave behind. The trailing turn is excluded too: it may
+ * be a generation in flight.
+ *
+ * @param events - complete log.
+ * @param session - the official Session built from those events, so the
+ *   derivation rule is DSH's own, not a copy.
+ * @returns turn numbers, ascending.
+ */
+function emptyTurnBrackets(events, session) {
+  const bySeq = new Map(events.map((event) => [event.seq, event]))
+  const visible = (seq) => {
+    const event = bySeq.get(seq)
+    if (event === undefined) return false
+    const message = session.deriveEventMessage(event)
+    if (message === null) return false
+    if (message.role === 'user' && message.content.length === 0) return false
+    return true
+  }
+  const surfaceSeqs = new Set(PLUGIN.foldSurface(events).nodes)
+  const ledger = PLUGIN.rerunLedger(events)
+  const retired = new Set(
+    PLUGIN.retiredTurnList(events, PLUGIN.foldSurface(events), ledger, { inFlightId: null }),
+  )
+  const maxTurn = PLUGIN.lastTurnOf(events)
+  const out = []
+  for (const span of PLUGIN.turnSpans(events)) {
+    if (retired.has(span.turn) || span.turn === maxTurn) continue
+    const owned = [...surfaceSeqs].filter(
+      (seq) => seq > span.startSeq && (span.endSeq === null || seq <= span.endSeq),
+    )
+    if (!owned.some(visible)) out.push(span.turn)
+  }
+  return out
 }
 
 // Full official validation: encode every event through the shipped codec and
@@ -194,7 +256,7 @@ function performRerun(session, targetSeq) {
   const plan = PLUGIN.planRerun(events, surface, { seq: targetSeq })
   const rerunId = randomUUID()
   const promptRequestId = randomUUID()
-  for (const write of PLUGIN.buildShadowWrites(plan, PLUGIN.lastTurnOf(events) + 1, rerunId, promptRequestId)) {
+  for (const write of PLUGIN.buildShadowWrites(plan, rerunId, promptRequestId)) {
     if (write.surfaceOp === undefined) session.append(write.type, write.data)
     else session.append(write.type, write.data, { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs })
   }
@@ -232,7 +294,26 @@ console.log('dsh-rerun-turn surface contract')
   const turnD = toolTurn(session, 4, 'D', 'D1 working', 'call_D', 'run_code', 'result D', 'D1 final')
   plainTurn(session, 5, 'E', 'E1')
 
+  const beforeRerun = session.snapshotEvents()
   const { plan, rerunId, promptRequestId } = performRerun(session, turnC.reply)
+  ok('the shadow opens no turn at all: it buys no turn number', () => {
+    const afterShadow = session.snapshotEvents()
+    assert.equal(afterShadow.length, beforeRerun.length + 1, 'the shadow is exactly one event')
+    // The carrier is one empty user/message with no turn bracket around it, so
+    // the log's turn numbering - and therefore the loop's own counter - never
+    // moves. A carrier that opened a turn is what left an empty "completed"
+    // strip on screen and a hole in the trajectory numbering (0.1.14-0.1.25).
+    assert.equal(PLUGIN.lastTurnOf(afterShadow), PLUGIN.lastTurnOf(beforeRerun))
+    assert.deepEqual(
+      PLUGIN.turnSpans(afterShadow).map((span) => span.turn),
+      PLUGIN.turnSpans(beforeRerun).map((span) => span.turn),
+    )
+    const carrier = afterShadow[afterShadow.length - 1]
+    assert.equal(carrier.type, 'user/message')
+    assert.equal(carrier.data.content.length, 0, 'no content for the model to read')
+    assert.equal(carrier.data.turn, undefined, 'a user carrier carries no turn coordinate')
+    assert.equal(PLUGIN.isRerunCarrier(carrier), true)
+  })
   ok('plan targets the whole turn C window', () => {
     assert.equal(plan.turn, 3)
     assert.equal(plan.promptSeq, turnC.prompt)
@@ -304,7 +385,7 @@ console.log('dsh-rerun-turn surface contract')
     isSeeded: false,
   })
   ok('the derived context is exactly A B C1fresh D E (the infix splice)', () => {
-    const shape = derivedShape(reloaded)
+    const shape = modelShape(reloaded)
     assert.deepEqual(shape, [
       'system:SYSTEM PROMPT',
       'user:A',
@@ -322,6 +403,25 @@ console.log('dsh-rerun-turn surface contract')
       'user:F',
       'assistant:F1',
     ])
+    // The carrier is the ONLY empty message in the derivation, and it sits where
+    // the old window was - right before the re-sent prompt.
+    const raw = derivedShape(reloaded)
+    assert.deepEqual(
+      raw.filter((row) => row === 'user:<carrier>').length,
+      1,
+      'exactly one silent carrier',
+    )
+    assert.equal(
+      raw.indexOf('user:<carrier>'),
+      raw.indexOf('user:C') - 1,
+      'the carrier stands where the retired window was',
+    )
+  })
+  ok('no turn in the finished log exists only to hold bookkeeping', () => {
+    const empty = emptyTurnBrackets(finalEvents, reloaded)
+    assert.deepEqual(empty, [], `turns with nothing on screen: ${empty.join(',')}`)
+    const turns = finalEvents.filter((event) => event.type === 'turn/start').map((event) => event.data.turn)
+    assert.deepEqual(turns, turns.map((_turn, index) => index + 1), 'turn numbers stay 1..N with no gap')
   })
   ok('replayed surface events are ordinary appends carrying the replay marker', () => {
     const markers = finalEvents
@@ -428,7 +528,7 @@ console.log('dsh-rerun-turn surface contract')
     isSeeded: false,
   })
   ok('the resumed log is valid and derives the spliced context', () => {
-    assert.deepEqual(derivedShape(reloaded), [
+    assert.deepEqual(modelShape(reloaded), [
       'system:SYSTEM PROMPT',
       'user:A',
       'assistant:A1',
@@ -452,7 +552,7 @@ console.log('dsh-rerun-turn surface contract')
   firstTurn(session, 'A', 'A1')
   const turnC = plainTurn(session, 2, 'C', 'C1')
   plainTurn(session, 3, 'D', 'D1')
-  const before = derivedShape(session)
+  const before = modelShape(session)
 
   const { rerunId } = performRerun(session, turnC.reply)
   // No rpcId event: the prompt was never claimed.
@@ -479,7 +579,10 @@ console.log('dsh-rerun-turn surface contract')
     isSeeded: false,
   })
   ok('a failed admission replays the prompt too - the context keeps its content', () => {
-    assert.deepEqual(derivedShape(reloaded), before)
+    // The carrier stands where the window was, so it is the one row the wire
+    // view drops; everything the model reads must be byte-identical.
+    assert.deepEqual(modelShape(reloaded), before)
+    assert.deepEqual(emptyTurnBrackets(finalEvents, reloaded), [], 'an empty window still leaves no empty turn')
   })
   ok('that rerun counts as complete (the prompt travelled as a copy)', () => {
     assert.equal(PLUGIN.rerunLedger(finalEvents).reruns[0].complete, true)
@@ -556,7 +659,7 @@ console.log('dsh-rerun-turn surface contract')
     isSeeded: false,
   })
   ok('the chained rerun lands A B C1second D and both records complete', () => {
-    assert.deepEqual(derivedShape(reloaded), [
+    assert.deepEqual(modelShape(reloaded), [
       'system:SYSTEM PROMPT',
       'user:A',
       'assistant:A1',
@@ -675,7 +778,7 @@ console.log('dsh-rerun-turn surface contract')
     isSeeded: false,
   })
   ok('the replayed repair shape passes the validator and derives the tail', () => {
-    const shape = derivedShape(reloaded)
+    const shape = modelShape(reloaded)
     assert.deepEqual(shape, [
       'system:SYSTEM PROMPT',
       'user:C',
@@ -743,7 +846,7 @@ console.log('dsh-rerun-turn surface contract')
     isSeeded: false,
   })
   ok('the edited-prompt rerun derives the live wording and the replayed tail', () => {
-    assert.deepEqual(derivedShape(reloaded), [
+    assert.deepEqual(modelShape(reloaded), [
       'system:SYSTEM PROMPT',
       'user:A',
       'assistant:A1',
@@ -821,7 +924,7 @@ console.log('dsh-rerun-turn surface contract')
     isSeeded: false,
   })
   ok('a chained rerun replayed only the live surface, never retired log leftovers', () => {
-    const shape = derivedShape(reloaded)
+    const shape = modelShape(reloaded)
     assert.deepEqual(shape, [
       'system:SYSTEM PROMPT',
       'user:A',
@@ -832,6 +935,22 @@ console.log('dsh-rerun-turn surface contract')
       'assistant:C1',
     ])
   })
+  ok('both reruns complete, including the one whose window covered a carrier', () => {
+    // The first rerun's carrier stands where B's prompt was, so the second
+    // rerun (of A) shadows it. The replay retires it without a copy, and the
+    // ledger must agree - an eternally missing seq would make every /state poll
+    // append the replay batch again.
+    const ledger = PLUGIN.rerunLedger(finalEvents)
+    assert.equal(ledger.reruns.length, 2)
+    for (const entry of ledger.reruns) {
+      assert.deepEqual(entry.missing, [], `rerun ${entry.rerunId.slice(0, 8)} has no missing copy`)
+      assert.equal(entry.complete, true)
+    }
+    const coveredCarrier = finalEvents.some(
+      (event) => PLUGIN.isRerunCarrier(event) && second.record.shadowed.includes(event.seq),
+    )
+    assert.equal(coveredCarrier, true, 'the second window really did cover the first rerun carrier')
+  })
   ok('the second rerun\'s copies cite only surface nodes of its own window', () => {
     const copies = finalEvents
       .filter((event) => event.seq > second.record.carrierSeq)
@@ -841,6 +960,121 @@ console.log('dsh-rerun-turn surface contract')
     const shadowed = new Set(second.record.shadowed)
     for (const copy of copies) {
       assert.ok(shadowed.has(copy.originalSeq), `copy cites a shadowed node (${copy.originalSeq})`)
+    }
+  })
+}
+
+// Scenario 8 (the reported defect, in the shape of the real session): the user
+// asks the same question over and over ("Reply with exactly: FLICK") and presses
+// rerun on the same reply several times. 0.1.14-0.1.25 spent one turn number per
+// rerun on the bookkeeping carrier, so the transcript showed a bare "completed,
+// 1s" strip and the trajectory view showed 4/6/8 skipped. The log built here is
+// the fix's acceptance shape: the rerun must leave the turn numbering alone.
+{
+  const session = makeSession()
+  const ask = (turn) => plainTurn(session, turn, 'Reply with exactly: FLICK', 'FLICK')
+  firstTurn(session, 'Reply with exactly: FLICK', 'FLICK')
+  ask(2)
+
+  const before = session.snapshotEvents()
+  const beforeTurns = before.filter((event) => event.type === 'turn/start').length
+
+  // Three reruns of the same answer, the way the user pressed the button.
+  let target = before.find((event) => event.type === 'assistant/message').seq
+  const runs = []
+  for (let index = 0; index < 3; index += 1) {
+    const run = performRerun(session, target)
+    const genTurn = nextTurn(session)
+    session.append('turn/start', { turn: genTurn })
+    session.append('step/start', { turn: genTurn, step: 1 })
+    session.append('user/message', userMessage('Reply with exactly: FLICK', { rpcId: run.promptRequestId }), {
+      surfaceOp: 'append',
+    })
+    const reply = session.append(
+      'assistant/message',
+      { turn: genTurn, step: 1, message: assistantMessage('FLICK'), stream: [] },
+      { surfaceOp: 'append' },
+    ).seq
+    session.append('step/end', { turn: genTurn, step: 1 })
+    session.append('turn/end', { turn: genTurn, reason: { kind: 'completed' } })
+    const mid = session.snapshotEvents()
+    const record = PLUGIN.rerunLedger(mid).reruns.find((entry) => entry.rerunId === run.rerunId)
+    for (const write of PLUGIN.buildReplayWrites(
+      mid,
+      { logFrom: record.replayFrom, logTo: record.logTo, promptSeq: record.promptSeq, shadowed: record.shadowed },
+      PLUGIN.lastTurnOf(mid) + 1,
+      run.rerunId,
+      session.seq,
+      false,
+    )) {
+      if (write.surfaceOp === undefined) session.append(write.type, write.data)
+      else session.append(write.type, write.data, { surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs })
+    }
+    runs.push({ run, record, reply })
+    target = reply
+  }
+
+  const finalEvents = session.snapshotEvents()
+  const artifact = officialRoundTrip(finalEvents, { id: session.id, createdAt: Date.now() })
+  const reloaded = Session.create(session.id, artifact.events, {
+    version: SESSION_FORMAT_VERSION,
+    id: session.id,
+    createdAt: Date.now(),
+    isSeeded: false,
+  })
+  ok('three reruns of the same turn pass the strict cold read', () => {
+    assert.equal(artifact.events.length, finalEvents.length)
+    assert.equal(PLUGIN.rerunLedger(finalEvents).reruns.filter((entry) => entry.complete).length, 3)
+  })
+  ok('no rerun left a turn that holds only the carrier', () => {
+    // 0.1.25's log: one carrier turn per rerun (four extra brackets here). Now
+    // the shadow is one turn-free user/message, so a rerun adds exactly ONE
+    // turn - the regenerated one - and every bracket holds a real exchange.
+    const turns = finalEvents.filter((event) => event.type === 'turn/start')
+    assert.deepEqual(
+      turns.map((event) => event.data.turn),
+      turns.map((_turn, index) => index + 1),
+      'turn numbers are 1..N with no hole',
+    )
+    // Three reruns wrote three shadow events; not one of them bought a turn.
+    assert.equal(finalEvents.filter((event) => PLUGIN.isRerunCarrier(event)).length, 3)
+    assert.deepEqual(emptyTurnBrackets(finalEvents, reloaded), [])
+  })
+  ok('every carrier is an empty user message no adapter sends', () => {
+    const carriers = finalEvents.filter((event) => PLUGIN.isRerunCarrier(event))
+    assert.equal(carriers.length, 3)
+    for (const carrier of carriers) {
+      assert.equal(carrier.type, 'user/message')
+      assert.equal(carrier.data.content.length, 0)
+      assert.equal(carrier.data.source.kind, 'plugin:dsh-rerun-turn')
+      assert.equal(carrier.data.turn, undefined)
+    }
+    const shape = derivedShape(reloaded)
+    assert.equal(shape.filter((row) => row === 'user:<carrier>').length, 3, 'the carriers are the only empty rows')
+    // Each rerun re-sends its own prompt and replays the single surviving tail
+    // turn, so the conversation stays two exchanges long however many times the
+    // button is pressed - exactly what the 0.1.25 log derived, minus the
+    // bookkeeping the carrier turn used to leave in the turn numbering.
+    assert.deepEqual(modelShape(reloaded), [
+      'system:SYSTEM PROMPT',
+      'user:Reply with exactly: FLICK',
+      'assistant:FLICK',
+      'user:Reply with exactly: FLICK',
+      'assistant:FLICK',
+    ])
+  })
+  ok('the turn-free carrier needs no turn-level hiding at all', () => {
+    // 0.1.14-0.1.25 shipped `markerTurns` so the client could hide the
+    // bookkeeping turns; with the carrier living outside every turn there is
+    // nothing to hide by turn number, and the carrier row is retired by seq the
+    // way every other retired row is.
+    const ledger = PLUGIN.rerunLedger(finalEvents)
+    assert.deepEqual(ledger.reruns.map((entry) => entry.carrierTurn), [null, null, null])
+    for (const carrier of finalEvents.filter((event) => PLUGIN.isRerunCarrier(event))) {
+      assert.ok(
+        ledger.hidden.some((entry) => entry.seq === carrier.seq),
+        'the carrier row is hidden by seq',
+      )
     }
   })
 }

@@ -23,7 +23,7 @@ DSH 的模型上下文是每次调用从会话 surface 重新推导的。官方�
 
 - **中缀重跑（本插件的全部意义）** —— 重放把后续轮次以官方事件写回日志，冷读、导出、其他实例看到的内容与模型上下文完全一致。不是"改画面"，是真的上下文。
 - **只用官方缝** —— 遮蔽是一条标准的 `surfaceOp: { op: 'replace', startSeq, endSeq }` 替换事件（与 `/compact` 同一契约）；重放是普通的 `append` 事件。**没有自定义事件类型**——外挂插件的事件无法通过 v4 格式校验（未知类型必须带 `ignorable`，而 `Session.append` 不写这个字段），这条约束直接排除了"自定义投影事件"的路线。
-- **静默载体** —— 遮蔽载体是一个**空的 `developer/message`**（空内容投影为零条模型消息），并按格式要求包在一个开合完整的合成轮次里（格式只在打开的轮次+步骤里读 developer 消息——这一点由兄弟插件 dsh-edit-turn 在真实校验器上踩实）。
+- **静默载体，且不占轮次** —— 遮蔽载体是一条**空的 `user/message`**（`source.kind = plugin:dsh-rerun-turn`），它**不开轮次、不开步骤**：格式里只有 `user/message` 不需要打开中的 turn/step。它落在 surface 上，但**任何官方适配器都不会把它发给模型**——deepseek 适配器跳过「user 且 content 为空」，pi-ai 适配器同一处跳过（源码里就叫 `dsh-delete-turn:skip-empty-user`，与本插件的形状同一件事）。0.1.14-0.1.25 用的是"空 `system/message` + 合成簿记轮"，那一版每重跑一次就花掉一个轮号：对话视图里留下一条空的「已完成」条，轨迹视图轮号出现空洞（0.1.26 修）。
 - **重放保真** —— 逐事件复制：轮次括号、用户消息、助手消息（含思考与工具调用块）、`tool/call`、`tool/result`（`sourceEventSeqs` 重映射到副本）、`TOOL_NOT_STARTED` 修复结果（保留其"无 sourceEventSeqs"的精确形状）；丢弃 `usage`（防统计翻倍）、内嵌 stream、系统消息（系统提示词由循环自己调和）与全部纯记账事件。
 - **崩溃可恢复** —— 承载事件记住 `rerunId`，fold 记住它遮蔽了哪些节点，每个副本带 `originalSeq` 标记；"哪些副本还没写"永远可以从日志单独算出来。`/state` 默认自动续传（会话活着、空闲、收件箱为空时），半写的括号孤儿会被识别并续写而不是误判为忙。
 - **准入失败也有正确回退** —— 重新生成没能入队时，重放会把提示词本身也复制回去，上下文内容与重跑前完全一致（不丢问题）。
@@ -75,9 +75,11 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 一次重跑是三组官方操作，按序落地：
 
-**① 遮蔽（SHADOW）。** 从目标轮次的提示词到 surface 末尾，是一条连续的窗口；追加一条带 `surfaceOp: { op: 'replace', startSeq, endSeq }` 的**不占轮次**的 `user/message` 载体，`sourceEventSeqs` 完整列出被遮蔽的每一个节点。载体内容是单个零宽空格（真实 provider 接受、对模型不可见），`source.kind = plugin:dsh-rerun-turn`（平台不会把它当人类提问回答，也不该回答）。
+**① 遮蔽（SHADOW）。** 从目标轮次的提示词到 surface 末尾，是一条连续的窗口；追加一条带 `surfaceOp: { op: 'replace', startSeq, endSeq }` 的**不占轮次**的 `user/message` 载体，`sourceEventSeqs` 完整列出被遮蔽的每一个节点。载体**内容为空**、`source.kind = plugin:dsh-rerun-turn`：空内容被两个官方适配器在发请求前直接跳过（模型看不到它），`plugin:` 类型让平台不会把它当人类提问（`dsh-session-turn-outline` 只认 `source.kind === 'user'` 的人类提问）。
 
-> **为什么载体不能开轮次（0.1.1 的事故与修复）**：0.1.0 用"空 developer/message + 自开轮次"当载体。它通过了追加校验，但**代理循环的轮号计数器是进程内局部的**——只统计循环自己开的轮，永不重读日志里的最大轮号。于是循环为再生成开轮时**复用了载体占过的号**，日志从此冷读失败（`turn/start does not open the expected turn`）。同理，重放写下的轮次也会被循环的下一次开轮撞上。0.1.1 的修复有两件：载体彻底不占轮次；**重放完成后把循环的空闲计数器同步到日志真实最大轮号**（`syncLoopTurn`，带形状守卫、失败降级并写诊断——DSH 没有官方重同步 API，这是本插件唯一一处触及循环状态的地方）。
+> **为什么载体不能开轮次（0.1.1 的事故、0.1.14 的倒退、0.1.26 的定案）**：0.1.0 用"空 developer/message + 自开轮次"当载体。它通过了追加校验，但**代理循环的轮号计数器是进程内局部的**——只统计循环自己开的轮，永不重读日志里的最大轮号。于是循环为再生成开轮时**复用了载体占过的号**，日志从此冷读失败（`turn/start does not open the expected turn`）。同理，重放写下的轮次也会被循环的下一次开轮撞上。0.1.1 的修复有两件：载体彻底不占轮次；**重放完成后把循环的空闲计数器同步到日志真实最大轮号**（`syncLoopTurn`，带形状守卫、失败降级并写诊断——DSH 没有官方重同步 API，这是本插件唯一一处触及循环状态的地方）。
+>
+> 0.1.14 为了"载体完全不进模型输入"改回**开轮次**的形状（空 `system/message` + 合成簿记轮）：模型确实看不到了，但每重跑一次就多一个**没有内容的轮次**——对话视图里是一条空的「已完成，用时 N 秒」，轨迹视图里轮号出现空洞（真实会话 `session-5ce30467` 的 turn 4/6/8/10/12 就是这样）。0.1.26 回到不占轮次的载体，同时保住"模型看不到"：内容置**空**（不是零宽空格），两个官方适配器都在发送前跳过空 user 消息。格式义务仍由同一处满足——只有 `user/message` 能在没有打开中的 turn/step 时被读取（`system/message` / `developer/message` 是 step 事件、`assistant/message` 走同一检查、替换型 `tool/result` 需要打开中的轮次），所以**不占轮次的载体只可能是空 user 消息这一种形状**。
 
 **② 再生成（REGENERATE）。** 走官方准入路径 `ctx.sessionController.prompt({ mode: 'queue', content: 原提示词 })`。模型看到的正是 A B + 提示词，用会话自己的模型与工具重新回答。后台任务通过 `agent.whenIdle()`（失败时轮询日志的 `turn/end`）等它闭合。
 
@@ -104,7 +106,7 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 | 前端 | `conversation.chat.assistant-actions` | 回答动作条里的 ↻ 入口（order 6，编辑铅笔之后） |
 | 前端 | `conversation.input.overlay` | 隐藏被退役的行、跟随后台重跑、显示确认/错误 |
 
-**给兄弟插件的契约**：每次重跑落一条 `developer/message` 替换载体（`source.kind === 'plugin:dsh-rerun-turn'`、`rerunBy`、`rerunId`）；每个重放副本的 `message.source` 带 `{ rerunBy, rerunId, originalSeq }`。按 surface 校验的入口可以沿 `/state` 的 `reruns[].shadowed` 或副本的 `originalSeq` 找到活节点。
+**给兄弟插件的契约**：每次重跑落一条**空 `user/message` 替换载体**（`source.kind === 'plugin:dsh-rerun-turn'`、`rerunBy`、`rerunId`，`content: []`，**不占轮次**）；每个重放副本的 `message.source` 带 `{ rerunBy, rerunId, originalSeq }`。按 surface 校验的入口可以沿 `/state` 的 `reruns[].shadowed` 或副本的 `originalSeq` 找到活节点。识别约定：`source.kind` 以 `plugin:` 开头且内容为空的 user 消息是**静默载体**，不是提示词——本插件的规划器（`resolveRerunPrompt`）据此拒绝"重发一条已被删除/已被替换掉的提示词"；dsh-edit-turn 的就地改写（`kind: 'user'` + `editedBy`，且带新文本）不受影响，仍然可以重跑。历史形状（0.1.0-0.1.13 的 developer/user 载体、0.1.14-0.1.25 的 system/message 载体 + 簿记轮）继续被识别，旧日志的账本、隐藏集与 `markerTurns` 都照旧正确。
 
 ### 验证状态
 
@@ -112,8 +114,8 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| 单测（窗口规划、重放改写、标记、恢复匹配、计数器同步，+ 客户端 DOM stub 的注入/隐藏/重装用例） | `npm test` | **26 项通过**（18 宿主 + 8 客户端 DOM） |
-| 官方校验器契约（真实 `Session` + `sessionFormatCatalog` **strict 冷读**往返） | `npm run verify:contract` | **22 项通过**：完整重跑后的日志（含重跑后新增的普通轮）通过 v4 词汇表/关系/生命周期 + `Session.fromRestore`；派生上下文恰好 **A B C1' D' E'**；链式重跑；崩溃半写后续传；准入失败回退；`TOOL_NOT_STARTED` 修复保真 |
+| 单测（窗口规划、重放改写、标记、恢复匹配、计数器同步、载体不占轮次，+ 客户端 DOM stub 的注入/隐藏/重装用例） | `npm test` | **56 项通过** |
+| 官方校验器契约（真实 `Session` + `sessionFormatCatalog` **strict 冷读**往返） | `npm run verify:contract` | **29 项通过**：完整重跑后的日志（含重跑后新增的普通轮）通过 v4 词汇表/关系/生命周期 + `Session.fromRestore`；派生上下文恰好 **A B C1' D' E'**（线上视图去掉空载体）；**遮蔽不买轮号、全日志没有任何"只装载体"的轮次**；"同一轮连点三次 ↻"的真机形状；链式重跑；崩溃半写后续传；准入失败回退；`TOOL_NOT_STARTED` 修复保真 |
 | 客户端静态检查 + 运行中实例下发字节 | `npm run verify:client` / `npm run verify:live -- <token 日志>` | **7 项通过**：模块可加载、槽位/字典/版本/错误码一致；3080 实例下发的模块组里就是本插件的当前字节 |
 | **真实沙箱端到端**（独立 DSH_HOME + 独立端口，真实模型调用） | `npm run verify:e2e` | **通过**：3 轮 scratch 会话 → `/apply` 重跑中间轮 → 后台生成+重放完成 → **追加第 4 轮提示** → 读**实时派生上下文**：提示词保序、中间回答是新生成的、后一轮是带 `originalSeq` 标记的重放副本；随后用 `tools/repair-session.mjs` 对沙箱写出的日志做**严格冷读校验：0 broken** |
 | 运行中实例挂载探针 | `npm run probe:loaded [端口]` | 通过：`/state` 返 400、`/apply` 返 405 |
@@ -148,6 +150,17 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
    工具只自动修复带 `plugin:dsh-rerun-turn` 标记的坏日志；其他坏日志只报告不动。修复后重开会话，待处理的提示词会被循环自动补答。
 
 ### 更新日志
+
+**0.1.26** —— 修复真机可见缺陷：**载体占了独立的轮次，屏幕上留下空的「已完成」空壳**（对话视图）+ **轮号空洞**（轨迹视图），两者同一个根因。
+
+- 现场（`session-5ce30467`）：用户对同一条提问反复点 ↻，日志里出现 turn 4/6/8/10/12——每个只有一条空 `system/message` 载体、`turn/start → step/start → 载体 → step/end → turn/end`，屏幕上就是「已完成，用时 1 秒」下面什么都没有，轨迹视图轮号 2,3,5,7,9,11,13 跳号。
+- 根因：0.1.14 起载体是**空 `system/message` + 合成簿记轮**，每重跑一次消耗一个轮号。而格式里 `system/message`/`developer/message` 只能在打开中的 turn+step 里被读（`requireStep`）、`assistant/message` 走同一检查、替换型 `tool/result` 需要打开中的轮次、`turn/start` 又必须等于 `nextTurn`（已关闭的轮次回不去）——所以**只要载体是这几种类型之一，就必须开一个轮次**。
+- 修法：载体改回**不占轮次**的空 `user/message`（`source.kind = plugin:dsh-rerun-turn`，`content: []`）。格式只对 `user/message` 不要求打开中的 turn/step；"模型看不到"这条不变——两个官方适配器都在发请求前丢掉空 user 消息（`dsh-llm-deepseek`：`role === "user" && content.length === 0 → continue`；pi-ai：同款跳过，注释里叫 `dsh-delete-turn:skip-empty-user`）。同一个形状也是 dsh-delete-turn 一直在用的静默载体，**不是新发明的写法**。
+- 连带修正：`resolveRerunPrompt` 不再把"站在已退役提示词位置上的静默载体"当作可重发的提示词（空内容也过不了 prompt 准入）；重放不再复制本插件自己的载体（记账不是对话，副本只会变成空节点）；`/dev/derived` 报的是**适配器真正发出的请求**（去掉空 user 消息），不再把派生列表直接当成模型输入。宿主不再需要 `syncLoopTurn` 去迁就载体轮——载体的那次调用整个删掉了（重放之后的那次保留）。
+- 客户端：`markerTurns`/`retiredTurns` 的轮号判定除了 key 之外也读平台自己的 `data-chat-turn`——DSH 现在把过程/尾巴行按**节点 kind** 作 key（`turn-tail`、`["turn-tail","response"]`），只从 key 里抠轮号会让旧日志（以及被退役的轮）的空条留在屏幕上。
+- 验证：56 单测 / 29 契约 / 7 客户端全绿；`/tmp` 副本还原改动 → 恰好 4 条新增用例转红（2 条载体形状 + 2 条客户端隐藏），契约校验器在第一条新断言就红；**真实会话 `session-5ce30467` 全程用真机校验器（0.2.0-rc.2）验证**：原日志照旧严格冷读通过、账本输出与 0.1.25 逐字节一致；在该日志上跑一次新形状重跑（真 `Session` 追加 + 重新冷读）通过，遮蔽买的轮号数为 **0**（只有再生成轮 +1）。
+
+**0.1.25** —— 没有定稿作答的轮次也能重跑（点它的提示词行）：`rerunnableReplies` 末尾为"有活提示词、但没有可重跑回答"的轮次补一条 `{ seq: 提示词 seq, messageId: null }`，规划器只在这类轮次接受提示词寻址。
 
 **0.1.24** —— 补齐 0.1.23 的一个漏网形状：提示词被兄弟插件替换成**非用户消息**时，界面仍会给出 ↻。
 
@@ -338,10 +351,16 @@ This plugin does it:
   out-of-repo plugin events cannot pass the v4 format validator (unknown types
   need the `ignorable` envelope field, which `Session.append` never writes), so
   the "custom projection event" route is closed by design.
-- **Silent carrier** - an empty `developer/message` (empty content projects to
-  no model message), wrapped in its own closed turn (the format reads a
-  developer message only inside an open turn and step - a constraint the
-  sibling plugin dsh-edit-turn proved on the real validator).
+- **Silent carrier that owns no turn** - one empty `user/message`
+  (`source.kind = plugin:dsh-rerun-turn`). `user/message` is the only surface
+  type the format reads with no open turn and no open step, and empty content is
+  dropped before the request leaves the process: the DeepSeek adapter skips
+  `role === "user" && content.length === 0`, and the pi-ai adapter carries the
+  same skip under the name `dsh-delete-turn:skip-empty-user` (the sibling
+  plugins write the identical carrier). 0.1.14-0.1.25 used an empty
+  `system/message` inside a synthetic bookkeeping turn instead, which spent one
+  turn number per rerun: a bare "completed" strip in the transcript and a hole
+  in the trajectory numbering (fixed in 0.1.26).
 - **Faithful replay** - turn brackets, user/assistant messages (reasoning and
   tool-call blocks included), `tool/call`, `tool/result` (with
   `sourceEventSeqs` remapped onto the copies), and the `TOOL_NOT_STARTED`
@@ -386,7 +405,8 @@ answer and the replayed rows appear in the order the model reads them.
 
 Three official operations, in order: **shadow** (one replace event over
 `[the turn's prompt .. the last surface node]`, carried by a **turn-less**
-`user/message` whose content is a single zero-width space and whose
+`user/message` whose content is EMPTY - a shape both shipped adapters drop
+before sending, and one the sibling plugins already write - and whose
 `source.kind` marks it plugin-written), **regenerate**
 (`sessionController.prompt` re-sends the turn's prompt through the official
 admission path, then `agent.whenIdle()` waits for the fresh answer), and
@@ -395,22 +415,34 @@ renumbered contiguous turns, fresh ids, remapped `sourceEventSeqs`, and a
 `{ rerunBy, rerunId, originalSeq }` marker in each message source). The
 append-only log is never rewritten.
 
-Why the carrier owns no turn (the 0.1.0 incident and its fix): the agent
-loop's turn counter is process-local - it counts only the turns the loop
-itself opened and never re-reads the log. A carrier that opened its own turn
-made the loop reuse that number for the regenerated turn, and the log failed
-its cold read from then on. The same applies to the replayed turns, so 0.1.1
-also re-points the loop's idle counter at the log's true last turn after the
-replay (`syncLoopTurn`, shape-guarded and best-effort; DSH exposes no official
-re-sync API). The `tools/repair-session.mjs` utility repairs logs written by
-0.1.0.
+Why the carrier owns no turn (the 0.1.0 incident, the 0.1.14 regression and
+the 0.1.26 decision): the agent loop's turn counter is process-local - it
+counts only the turns the loop itself opened and never re-reads the log. A
+carrier that opened its own turn made the loop reuse that number for the
+regenerated turn, and the log failed its cold read from then on. The same
+applies to the replayed turns, so 0.1.1 also re-points the loop's idle counter
+at the log's true last turn after the replay (`syncLoopTurn`, shape-guarded
+and best-effort; DSH exposes no official re-sync API). The `tools/repair-session.mjs`
+utility repairs logs written by 0.1.0.
+
+0.1.14 traded that away to keep the carrier out of the model input entirely
+(empty `system/message` in a synthetic turn) and paid a turn number per rerun:
+an empty "completed, 1s" strip under the fresh answer, and a hole in the
+trajectory numbering. The format leaves exactly one turn-free carrier shape -
+an empty `user/message` - because `system/message` and `developer/message`
+are step events (they need an open turn AND step), `assistant/message` goes
+through the same check, a replacement `tool/result` needs an open turn, and
+`turn/start` must equal `nextTurn`, so a turn already closed can never be
+re-entered. 0.1.26 takes that shape and keeps the invisibility by leaving the
+content EMPTY (not a zero-width space, which the model did read and comment
+on in 0.1.13).
 
 ### Verification status
 
 | Check | Command | Result |
 |---|---|---|
-| Unit tests (host logic + client DOM stub: injection, hiding, re-apply) | `npm test` | 26 passed (18 host + 8 client DOM) |
-| Real-validator contract (encode/restore round-trip) | `npm run verify:contract` | 22 passed: the rerun log survives the v4 vocabulary/relationship/lifecycle validators plus `Session.fromRestore`; the derived context is exactly **A B C1' D' E'**; chained reruns; crash-resume; admission-failure fallback; `TOOL_NOT_STARTED` fidelity |
+| Unit tests (host logic + client DOM stub: injection, hiding, re-apply, turn-free carrier) | `npm test` | 56 passed |
+| Real-validator contract (encode/restore round-trip) | `npm run verify:contract` | 29 passed: the rerun log survives the v4 vocabulary/relationship/lifecycle validators plus `Session.fromRestore`; the derived context is exactly **A B C1' D' E'** (the wire view drops the empty carriers); the shadow buys no turn number and no turn in the finished log holds only bookkeeping; the reported "same reply, three reruns" shape; chained reruns; crash-resume; admission-failure fallback; `TOOL_NOT_STARTED` fidelity |
 | Client statics + live delivery bytes | `npm run verify:client` / `verify:live` | 7 passed |
 | **Real sandbox end-to-end** (isolated DSH_HOME/port, real model calls) | `npm run verify:e2e` | Passed: a 3-turn scratch session, the middle turn rerun via `/apply`, background regeneration + replay, and the **live derived context** asserted to be the spliced order with a marked replay copy |
 | Mounted-instance probe | `npm run probe:loaded [port]` | Passed |
@@ -437,6 +469,14 @@ button before relying on it.
 - There is no undo (use the official fork for branching, not implemented).
 
 ### Changelog
+
+**0.1.26** — Fixed a user-visible defect: **the carrier occupied a turn of its own, leaving an empty "completed" shell on screen** in the conversation view and a numbering hole in the trajectory view - one root cause, two symptoms.
+
+- Field evidence (`session-5ce30467`, real machine): pressing ↻ on the same reply repeatedly produced turns 4/6/8/10/12 holding one empty `system/message` carrier each, which render as "completed, 1s" with nothing under it while the turn numbers skip 4/6/8/10/12.
+- Root cause: since 0.1.14 the carrier was an empty `system/message` inside a synthetic bookkeeping turn. The format reads `system/message`/`developer/message` only inside an open turn AND step (`requireStep`), `assistant/message` goes through the same check, a replacement `tool/result` needs an open turn, and `turn/start` must equal `nextTurn` - so any of those carrier types must open a turn.
+- Fix: back to a **turn-free** empty `user/message` (`source.kind = plugin:dsh-rerun-turn`, `content: []`); `user/message` is the only surface type with no turn/step requirement. Invisibility is preserved: both shipped adapters drop an empty user message before the request is built. It is also the exact shape dsh-delete-turn has been writing all along.
+- Also: `resolveRerunPrompt` no longer accepts a silent carrier as a re-sendable prompt; the replay no longer copies this plugin's own carriers; `/dev/derived` reports the request the adapters really send; the host no longer has to sync the loop's counter around the carrier.
+- Client: the turn lookup for `markerTurns`/`retiredTurns` now also reads the platform's own `data-chat-turn`, because DSH keys those rows by node kind (`turn-tail`, `["turn-tail","response"]`).
 
 **0.1.23** — Fixed "this reply cannot be rerun": the turn a reply reports can span more than one bracket, and the planner took the FIRST bracket with that number, so a reply that was plainly on screen with a live prompt in its own bracket was refused.
 

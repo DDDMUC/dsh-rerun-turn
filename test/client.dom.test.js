@@ -314,6 +314,38 @@ test('the two slot registrations carry the contract ids and orders', () => {
   assert.equal(overlaySlot.config.order, 10, 'after delete-turn (8) and edit-turn (9)')
 })
 
+// --- bookkeeping turns ----------------------------------------------------------
+
+test('a bookkeeping turn is hidden from the row data, not only from the flow key', () => {
+  // DSH keys the process/tail rows by node kind ('turn-tail',
+  // '["turn-tail","response"]') and publishes the turn on data-chat-turn.
+  // Reading the turn out of the key alone (0.1.14-0.1.25) left the carrier
+  // turn's empty "completed" strip on screen - the reported empty shell.
+  const strip = row('turn-tail', 4)
+  const process = row('["turn-process","response"]', 4)
+  const live = row('["turn-tail","response"]', 5)
+  transcriptRows.length = 0
+  transcriptRows.push(strip, process, live)
+  const nodes = {
+    'turn-tail': { kind: 'turn-tail', data: { seq: 40 } },
+    '["turn-process","response"]': { kind: 'turn-process', data: { seq: 41 } },
+    '["turn-tail","response"]': { kind: 'turn-tail', data: { seq: 50 } },
+  }
+  pass(view({ markerTurns: new Set([4]) }), nodes)
+  assert.equal(strip.dataset.dsrrHidden, '1', 'the carrier turn strip is hidden')
+  assert.equal(strip.style.display, 'none')
+  assert.equal(process.dataset.dsrrHidden, '1', 'its process row too')
+  assert.equal(live.dataset.dsrrHidden, undefined, 'a live turn is untouched')
+})
+
+test('a retired turn is hidden from the row data as well', () => {
+  const strip = row('turn-tail', 2)
+  transcriptRows.length = 0
+  transcriptRows.push(strip)
+  pass(view({ retiredTurns: new Set([2]) }), { 'turn-tail': { kind: 'turn-tail', data: { seq: 20 } } })
+  assert.equal(strip.dataset.dsrrHidden, '1')
+})
+
 // --- I4 hide attribution --------------------------------------------------------
 
 test('a sibling hide keeps the row closed even after this plugin retracts its own', () => {
