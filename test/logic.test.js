@@ -160,7 +160,7 @@ test('planRerun refuses file-attachment prompts', () => {
   assert.throws(() => P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq }), /file attachments/)
 })
 
-test('buildShadowWrites lands one empty user carrier and opens no turn', () => {
+test('buildShadowWrites lands one silent turn-free carrier and opens no turn', () => {
   const { events, seqs } = standardLog()
   const plan = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
   const writes = P.buildShadowWrites(plan, 'rerun-1', 'req-1')
@@ -173,7 +173,12 @@ test('buildShadowWrites lands one empty user carrier and opens no turn', () => {
   assert.deepEqual(carrier.surfaceOp, { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq })
   assert.deepEqual(carrier.sourceEventSeqs, plan.shadowed)
   assert.equal(carrier.data.role, 'user')
-  assert.equal(carrier.data.content.length, 0, 'empty content is dropped by every shipped LLM adapter')
+  // The shape follows this host's adapter proof - empty only where the
+  // installed adapter is proven to drop a user message whose content converts
+  // to nothing, one zero-width space otherwise (0.1.27; the two branches are
+  // pinned explicitly by the tests below, this one reads the load-time
+  // decision so it holds on a patched and on an unpatched machine).
+  assert.deepEqual(carrier.data.content, P.silentCarrierContent(P.ADAPTER_DROPS_EMPTY_USER_CONTENT))
   assert.equal(carrier.data.source.kind, 'plugin:dsh-rerun-turn', 'a plugin carrier is never read as a human prompt')
   assert.equal(carrier.data.source.rerunId, 'rerun-1')
   assert.equal(carrier.data.source.promptRequestId, 'req-1')
@@ -250,6 +255,110 @@ test('the turn-free carrier is what keeps bookkeeping out of the turn numbering'
   // ledgers read either one.
   assert.equal(P.isRerunCarrier(legacy[events.length + 2]), true)
   assert.equal(P.isRerunCarrier({ ...carrier, seq: events.length, time: 1 }), true)
+})
+
+test('without the adapter proof the carrier falls back to one zero-width space', () => {
+  const { events, seqs } = standardLog()
+  const plan = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
+  const writes = P.buildShadowWrites(plan, 'rerun-1', 'req-1', false)
+  // 0.1.27: an empty content list is only safe where the adapter converts it to
+  // nothing. An unpatched pi-ai adapter maps `content: []` to
+  // `{ role: 'user', content: '' }` and the provider refuses the whole request
+  // (HTTP 400 "user message must have content", measured 2026-10-07) - so with
+  // no proof the carrier MUST carry one zero-width space.
+  assert.deepEqual(writes.map((write) => write.type), ['user/message'], 'still exactly one write, no turn bracket')
+  const carrier = writes[0]
+  assert.deepEqual(carrier.data.content, [{ type: 'text', text: '\u200b' }], 'never an empty list without the proof')
+  assert.ok(carrier.data.content.length > 0, 'nothing here can convert to content: "" on the wire')
+  assert.deepEqual(P.silentCarrierContent(false), [{ type: 'text', text: '\u200b' }])
+  assert.notDeepEqual(P.silentCarrierContent(false), P.silentCarrierContent(true), 'the two branches differ')
+  // The fallback is still THIS plugin's carrier: the ledger, the replay skip and
+  // the "not a prompt" rule all key on the source mark, never on the content.
+  assert.equal(carrier.data.source.kind, 'plugin:dsh-rerun-turn')
+  assert.equal(P.isRerunCarrier(carrier), true, 'the ledger still records the rerun')
+  assert.equal(P.isSilentPluginCarrier(carrier), true, 'blank text is still not a prompt')
+  // And it still buys no turn number: the whole point of the turn-free carrier.
+  const carrierSeq = events.length
+  const landed = [...events, { ...carrier, seq: carrierSeq, time: 1 }]
+  assert.deepEqual(P.turnSpans(landed), P.turnSpans(events), 'no turn bracket appears in either shape')
+  assert.equal(P.lastTurnOf(landed), P.lastTurnOf(events), 'the turn numbering does not move')
+  const ledger = P.rerunLedger(landed)
+  assert.equal(ledger.reruns.length, 1, 'the fallback carrier opens one rerun record')
+  assert.equal(ledger.reruns[0].carrierSeq, carrierSeq)
+  assert.equal(ledger.hidden.some((entry) => entry.seq === carrierSeq), true, 'and its row is retired for the UI')
+})
+
+test('with the adapter proof the carrier stays the empty zero-token list', () => {
+  const { events, seqs } = standardLog()
+  const plan = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
+  const carrier = P.buildShadowWrites(plan, 'rerun-1', 'req-1', true)[0]
+  // The shape 0.1.26 wants, kept exactly where the installed adapter proves it
+  // drops a user message whose content converts to nothing.
+  assert.deepEqual(P.silentCarrierContent(true), [])
+  assert.deepEqual(carrier.data.content, [], 'empty only with the proof')
+  assert.equal(P.isRerunCarrier(carrier), true)
+  assert.equal(P.isSilentPluginCarrier(carrier), true)
+  const landed = [...events, { ...carrier, seq: events.length, time: 1 }]
+  assert.deepEqual(P.turnSpans(landed), P.turnSpans(events))
+  assert.equal(P.lastTurnOf(landed), P.lastTurnOf(events))
+  assert.equal(P.rerunLedger(landed).reruns[0].carrierSeq, events.length)
+})
+
+test('the adapter probe is pure, fails closed, and the default is its verdict', () => {
+  assert.equal(P.ADAPTER_PATCH_MARKER, 'dsh-delete-turn:skip-empty-user')
+  // The pure half: a boolean in, a boolean out - no file system, no argv.
+  assert.equal(P.adapterSourceDropsEmptyUserContent(`// ${P.ADAPTER_PATCH_MARKER}\nif (content.length === 0) continue`), true)
+  assert.equal(P.adapterSourceDropsEmptyUserContent('const content = userContent(message.content)'), false)
+  assert.equal(P.adapterSourceDropsEmptyUserContent(''), false)
+  assert.equal(P.adapterSourceDropsEmptyUserContent(undefined), false, 'an unread adapter is no proof')
+  assert.equal(P.adapterSourceDropsEmptyUserContent(null), false)
+  // The default parameter is the load-time probe's verdict, whatever this
+  // machine's adapter cache happens to hold; the test reads neither the cache
+  // nor process.argv, so it passes on a patched and on an unpatched host.
+  assert.equal(typeof P.ADAPTER_DROPS_EMPTY_USER_CONTENT, 'boolean')
+  const { events, seqs } = standardLog()
+  const plan = P.planRerun(events, surfaceOf(events), { seq: seqs.c1.seq })
+  const byDefault = P.buildShadowWrites(plan, 'rerun-1', 'req-1')[0]
+  assert.deepEqual(byDefault.data.content, P.silentCarrierContent(P.ADAPTER_DROPS_EMPTY_USER_CONTENT))
+  assert.deepEqual(
+    P.buildShadowWrites(plan, 'rerun-1', 'req-1', undefined)[0].data.content,
+    byDefault.data.content,
+    'undefined takes the load-time default',
+  )
+})
+
+test('a fallback carrier standing where the prompt was is not a re-sendable prompt', () => {
+  const { events, seqs } = standardLog()
+  // The shape a rerun leaves on an unproven host: the prompt is replaced by a
+  // zero-width carrier, which is the live node the replacement chain resolves
+  // to. Requiring an EMPTY list here would let a chained rerun re-send it as a
+  // prompt - a question nobody asked, and one the provider would refuse anyway.
+  const carrier = {
+    type: 'user/message',
+    seq: events.length,
+    time: 1,
+    data: {
+      id: uid('m'),
+      role: 'user',
+      content: [{ type: 'text', text: '\u200b' }],
+      source: { kind: 'plugin:dsh-rerun-turn', rerunBy: 'dsh-rerun-turn', rerunId: 'rerun-1', promptRequestId: 'req-1' },
+    },
+    surfaceOp: { op: 'replace', startSeq: seqs.c.seq, endSeq: seqs.c.seq },
+    sourceEventSeqs: [seqs.c.seq],
+  }
+  const log = [...events, carrier]
+  const surface = surfaceOf(log)
+  assert.equal(P.isSilentPluginCarrier(carrier), true)
+  assert.equal(
+    P.rerunnableReplies(log, surface).some((reply) => reply.seq === seqs.c1.seq),
+    false,
+    'no re-sendable prompt, so no offer',
+  )
+  assert.throws(
+    () => P.planRerun(log, surface, { seq: seqs.c1.seq }),
+    (error) => error.code === 'not-rerunnable' && /deletion or an earlier rerun/.test(error.message),
+    'the planner refuses the same reply the advertisement left out',
+  )
 })
 
 test('buildReplayWrites renumbers turns, marks copies, and drops usage and streams', () => {

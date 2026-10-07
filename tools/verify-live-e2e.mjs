@@ -125,16 +125,29 @@ assert(
 const after = await call('GET', `/dsh-rerun-turn/dev/derived?sessionId=${encodeURIComponent(sessionId)}`)
 assert(after.status === 200 && after.body.ok, 'the derived context reads after the rerun')
 const derived = after.body.derived
-// The rerun's bookkeeping carrier must never reach the model. The carrier IS an
-// empty user message on the surface (that is how a rerun retires a window), and
-// /dev/derived reports the request the adapters would send - where an empty user
-// message is skipped (dsh-llm-deepseek: `role === "user" && content.length === 0`;
-// pi-ai: `dsh-delete-turn:skip-empty-user`). So: no blank or zero-width user
-// message in the derived input, and the carrier itself opened no turn.
+// The rerun's bookkeeping carrier must never reach the model as READABLE text.
+// The carrier IS a user message on the surface (that is how a rerun retires a
+// window), and /dev/derived reports the request the adapters would send. On a
+// host whose adapter is proven to drop empty user content the carrier is
+// written empty and skipped on the way out (dsh-llm-deepseek: `role === "user"
+// && content.length === 0`; pi-ai: `dsh-delete-turn:skip-empty-user`), so no
+// blank row appears here. On a host without that proof the carrier carries one
+// zero-width space and IS on the wire by design (0.1.27 - an empty list would
+// make an unpatched adapter send `content: ''`, which the provider refuses with
+// HTTP 400). /dev/derived names the branch, so the check follows it.
+const carrierShape = after.body.carrier && after.body.carrier.shape
 const blankMessages = derived.filter(
   (entry) => entry.role === 'user' && (entry.text || '').replace(/[\u200B\uFEFF\s]/g, '') === '',
 )
-assert(blankMessages.length === 0, 'no blank or zero-width user message reaches the model')
+if (carrierShape === 'zero-width-space') {
+  assert(
+    blankMessages.length === 1,
+    `exactly the one fallback carrier is blank on the wire (got ${blankMessages.length})`,
+  )
+  console.log('  · carrier shape: zero-width-space (no adapter proof on this host)')
+} else {
+  assert(blankMessages.length === 0, 'no blank or zero-width user message reaches the model')
+}
 assert(finalState.reruns[0].carrierTurn === null, 'the carrier opened no bookkeeping turn')
 const userIndexes = derived
   .map((entry, index) => (entry.role === 'user' && entry.text.includes('TOKEN-') ? index : -1))
