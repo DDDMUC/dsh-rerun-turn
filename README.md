@@ -23,7 +23,7 @@ DSH 的模型上下文是每次调用从会话 surface 重新推导的。官方�
 
 - **中缀重跑（本插件的全部意义）** —— 重放把后续轮次以官方事件写回日志，冷读、导出、其他实例看到的内容与模型上下文完全一致。不是"改画面"，是真的上下文。
 - **只用官方缝** —— 遮蔽是一条标准的 `surfaceOp: { op: 'replace', startSeq, endSeq }` 替换事件（与 `/compact` 同一契约）；重放是普通的 `append` 事件。**没有自定义事件类型**——外挂插件的事件无法通过 v4 格式校验（未知类型必须带 `ignorable`，而 `Session.append` 不写这个字段），这条约束直接排除了"自定义投影事件"的路线。
-- **静默载体，且不占轮次** —— 遮蔽载体是一条**空的 `user/message`**（`source.kind = plugin:dsh-rerun-turn`），它**不开轮次、不开步骤**：格式里只有 `user/message` 不需要打开中的 turn/step。它落在 surface 上，但**任何官方适配器都不会把它发给模型**——deepseek 适配器跳过「user 且 content 为空」，pi-ai 适配器同一处跳过（源码里就叫 `dsh-delete-turn:skip-empty-user`，与本插件的形状同一件事）。0.1.14-0.1.25 用的是"空 `system/message` + 合成簿记轮"，那一版每重跑一次就花掉一个轮号：对话视图里留下一条空的「已完成」条，轨迹视图轮号出现空洞（0.1.26 修）。
+- **静默载体，且不占轮次** —— 遮蔽载体是一条**没有可读文本的 `user/message`**（`source.kind = plugin:dsh-rerun-turn`），它**不开轮次、不开步骤**：格式里只有 `user/message` 不需要打开中的 turn/step。它的**内容形状由装载时对已安装适配器的一次探测决定**（0.1.27）：只有证明「当前适配器会丢掉空 user 消息」时才写**空数组**（deepseek 适配器天然如此；pi-ai 需要本地手补丁 `dsh-delete-turn:skip-empty-user`），否则写**一个零宽空格**——未打补丁的 pi-ai 会把 `content: []` 变成 `{ role: 'user', content: '' }`，provider 直接 HTTP 400 `user message must have content` 并**中断整轮**（2026-10-07 桌面版真机事故）。0.1.14-0.1.25 用的是"空 `system/message` + 合成簿记轮"，那一版每重跑一次就花掉一个轮号：对话视图里留下一条空的「已完成」条，轨迹视图轮号出现空洞（0.1.26 修）。
 - **重放保真** —— 逐事件复制：轮次括号、用户消息、助手消息（含思考与工具调用块）、`tool/call`、`tool/result`（`sourceEventSeqs` 重映射到副本）、`TOOL_NOT_STARTED` 修复结果（保留其"无 sourceEventSeqs"的精确形状）；丢弃 `usage`（防统计翻倍）、内嵌 stream、系统消息（系统提示词由循环自己调和）与全部纯记账事件。
 - **崩溃可恢复** —— 承载事件记住 `rerunId`，fold 记住它遮蔽了哪些节点，每个副本带 `originalSeq` 标记；"哪些副本还没写"永远可以从日志单独算出来。`/state` 默认自动续传（会话活着、空闲、收件箱为空时），半写的括号孤儿会被识别并续写而不是误判为忙。
 - **准入失败也有正确回退** —— 重新生成没能入队时，重放会把提示词本身也复制回去，上下文内容与重跑前完全一致（不丢问题）。
@@ -75,11 +75,13 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 一次重跑是三组官方操作，按序落地：
 
-**① 遮蔽（SHADOW）。** 从目标轮次的提示词到 surface 末尾，是一条连续的窗口；追加一条带 `surfaceOp: { op: 'replace', startSeq, endSeq }` 的**不占轮次**的 `user/message` 载体，`sourceEventSeqs` 完整列出被遮蔽的每一个节点。载体**内容为空**、`source.kind = plugin:dsh-rerun-turn`：空内容被两个官方适配器在发请求前直接跳过（模型看不到它），`plugin:` 类型让平台不会把它当人类提问（`dsh-session-turn-outline` 只认 `source.kind === 'user'` 的人类提问）。
+**① 遮蔽（SHADOW）。** 从目标轮次的提示词到 surface 末尾，是一条连续的窗口；追加一条带 `surfaceOp: { op: 'replace', startSeq, endSeq }` 的**不占轮次**的 `user/message` 载体，`sourceEventSeqs` 完整列出被遮蔽的每一个节点。载体**没有任何可读文本**、`source.kind = plugin:dsh-rerun-turn`：`plugin:` 类型让平台不会把它当人类提问（`dsh-session-turn-outline` 只认 `source.kind === 'user'` 的人类提问），内容形状按装载时的适配器探测二选一（见下面 0.1.27 的说明）。
+
+> **载体内容为什么是两态（0.1.27）**：0.1.26 断言「两个官方适配器都会丢掉空 user 消息」，因此载体写死 `content: []`。这条断言**只在宿主装载的 pi-ai 带本地手补丁 `dsh-delete-turn:skip-empty-user` 时成立**——补丁只在 npx 缓存副本里，DSH **桌面版**（`app.asar` 内置运行时）没有。真机 `session-5c3c4c12`（2026-10-07 16:27:33）就是这样断的：载体 `content: []` → 未打补丁的 pi-ai 转成 `{ role: 'user', content: '' }` → provider 返回 `400 {"message":"user message must have content","param":"messages.93.content"}`，整轮 `turn/end → reason.error` 中止。同一天对真实 provider（`https://api.cline.bot/api/v1`，`cline-pass/deepseek-v4.1-flash`）实测：`content: ""` → 失败；`content: []` → 失败；`content: "\u200b"` → 通过；`content: "ok"` → 通过。所以 0.1.27 把形状改成**能力相关**：装载时从宿主入口解析 `@deepseek-ai/dsh-llm-pi-ai` 并读源码，**只有读到补丁标记**才写空数组，否则写一个零宽空格（代价是几个启发式 token，用户不可见，provider 一定接受）。**失败的默认方向是安全的那一侧**：解析不到、读不到、异常 → 都当"没有证明" → 零宽空格。**如果你要把载体改回空的，必须同时证明当前安装的适配器会丢掉它**——否则就是上面那次 400。
 
 > **为什么载体不能开轮次（0.1.1 的事故、0.1.14 的倒退、0.1.26 的定案）**：0.1.0 用"空 developer/message + 自开轮次"当载体。它通过了追加校验，但**代理循环的轮号计数器是进程内局部的**——只统计循环自己开的轮，永不重读日志里的最大轮号。于是循环为再生成开轮时**复用了载体占过的号**，日志从此冷读失败（`turn/start does not open the expected turn`）。同理，重放写下的轮次也会被循环的下一次开轮撞上。0.1.1 的修复有两件：载体彻底不占轮次；**重放完成后把循环的空闲计数器同步到日志真实最大轮号**（`syncLoopTurn`，带形状守卫、失败降级并写诊断——DSH 没有官方重同步 API，这是本插件唯一一处触及循环状态的地方）。
 >
-> 0.1.14 为了"载体完全不进模型输入"改回**开轮次**的形状（空 `system/message` + 合成簿记轮）：模型确实看不到了，但每重跑一次就多一个**没有内容的轮次**——对话视图里是一条空的「已完成，用时 N 秒」，轨迹视图里轮号出现空洞（真实会话 `session-5ce30467` 的 turn 4/6/8/10/12 就是这样）。0.1.26 回到不占轮次的载体，同时保住"模型看不到"：内容置**空**（不是零宽空格），两个官方适配器都在发送前跳过空 user 消息。格式义务仍由同一处满足——只有 `user/message` 能在没有打开中的 turn/step 时被读取（`system/message` / `developer/message` 是 step 事件、`assistant/message` 走同一检查、替换型 `tool/result` 需要打开中的轮次），所以**不占轮次的载体只可能是空 user 消息这一种形状**。
+> 0.1.14 为了"载体完全不进模型输入"改回**开轮次**的形状（空 `system/message` + 合成簿记轮）：模型确实看不到了，但每重跑一次就多一个**没有内容的轮次**——对话视图里是一条空的「已完成，用时 N 秒」，轨迹视图里轮号出现空洞（真实会话 `session-5ce30467` 的 turn 4/6/8/10/12 就是这样）。0.1.26 回到不占轮次的载体（0.1.27 起内容形状随宿主适配器能力二选一）。格式义务仍由同一处满足——只有 `user/message` 能在没有打开中的 turn/step 时被读取（`system/message` / `developer/message` 是 step 事件、`assistant/message` 走同一检查、替换型 `tool/result` 需要打开中的轮次），所以**不占轮次的载体只可能是 user 消息这一种形状**。
 
 **② 再生成（REGENERATE）。** 走官方准入路径 `ctx.sessionController.prompt({ mode: 'queue', content: 原提示词 })`。模型看到的正是 A B + 提示词，用会话自己的模型与工具重新回答。后台任务通过 `agent.whenIdle()`（失败时轮询日志的 `turn/end`）等它闭合。
 
@@ -106,7 +108,7 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 | 前端 | `conversation.chat.assistant-actions` | 回答动作条里的 ↻ 入口（order 6，编辑铅笔之后） |
 | 前端 | `conversation.input.overlay` | 隐藏被退役的行、跟随后台重跑、显示确认/错误 |
 
-**给兄弟插件的契约**：每次重跑落一条**空 `user/message` 替换载体**（`source.kind === 'plugin:dsh-rerun-turn'`、`rerunBy`、`rerunId`，`content: []`，**不占轮次**）；每个重放副本的 `message.source` 带 `{ rerunBy, rerunId, originalSeq }`。按 surface 校验的入口可以沿 `/state` 的 `reruns[].shadowed` 或副本的 `originalSeq` 找到活节点。识别约定：`source.kind` 以 `plugin:` 开头且内容为空的 user 消息是**静默载体**，不是提示词——本插件的规划器（`resolveRerunPrompt`）据此拒绝"重发一条已被删除/已被替换掉的提示词"；dsh-edit-turn 的就地改写（`kind: 'user'` + `editedBy`，且带新文本）不受影响，仍然可以重跑。历史形状（0.1.0-0.1.13 的 developer/user 载体、0.1.14-0.1.25 的 system/message 载体 + 簿记轮）继续被识别，旧日志的账本、隐藏集与 `markerTurns` 都照旧正确。
+**给兄弟插件的契约**：每次重跑落一条**没有可读文本的 `user/message` 替换载体**（`source.kind === 'plugin:dsh-rerun-turn'`、`rerunBy`、`rerunId`，**不占轮次**）；其 `content` 在 0.1.27 起为「空数组（证明适配器会丢）或一个零宽空格」，**不要按内容判形状**。每个重放副本的 `message.source` 带 `{ rerunBy, rerunId, originalSeq }`。按 surface 校验的入口可以沿 `/state` 的 `reruns[].shadowed` 或副本的 `originalSeq` 找到活节点。识别约定：`source.kind` 以 `plugin:` 开头、且内容里**没有可读文本**（空数组，或只有零宽/空白字符的文本块）的 user 消息是**静默载体**，不是提示词——本插件的规划器（`resolveRerunPrompt`）据此拒绝"重发一条已被删除/已被替换掉的提示词"；dsh-edit-turn 的就地改写（`kind: 'user'` + `editedBy`，且带新文本）不受影响，仍然可以重跑。历史形状（0.1.0-0.1.13 的 developer/user 载体、0.1.14-0.1.25 的 system/message 载体 + 簿记轮）继续被识别，旧日志的账本、隐藏集与 `markerTurns` 都照旧正确。
 
 ### 验证状态
 
@@ -114,8 +116,8 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| 单测（窗口规划、重放改写、标记、恢复匹配、计数器同步、载体不占轮次，+ 客户端 DOM stub 的注入/隐藏/重装用例） | `npm test` | **56 项通过** |
-| 官方校验器契约（真实 `Session` + `sessionFormatCatalog` **strict 冷读**往返） | `npm run verify:contract` | **29 项通过**：完整重跑后的日志（含重跑后新增的普通轮）通过 v4 词汇表/关系/生命周期 + `Session.fromRestore`；派生上下文恰好 **A B C1' D' E'**（线上视图去掉空载体）；**遮蔽不买轮号、全日志没有任何"只装载体"的轮次**；"同一轮连点三次 ↻"的真机形状；链式重跑；崩溃半写后续传；准入失败回退；`TOOL_NOT_STARTED` 修复保真 |
+| 单测（窗口规划、重放改写、标记、恢复匹配、计数器同步、载体不占轮次、载体两种内容形状，+ 客户端 DOM stub 的注入/隐藏/重装用例） | `npm test` | **60 项通过** |
+| 官方校验器契约（真实 `Session` + `sessionFormatCatalog` **strict 冷读**往返） | `npm run verify:contract` | **29 项通过**：完整重跑后的日志（含重跑后新增的普通轮）通过 v4 词汇表/关系/生命周期 + `Session.fromRestore`；派生上下文恰好 **A B C1' D' E'**（线上视图去掉静默载体）；**遮蔽不买轮号、全日志没有任何"只装载体"的轮次**；载体形状与本机适配器探测一致（无证明时不得为空）；"同一轮连点三次 ↻"的真机形状；链式重跑；崩溃半写后续传；准入失败回退；`TOOL_NOT_STARTED` 修复保真 |
 | 客户端静态检查 + 运行中实例下发字节 | `npm run verify:client` / `npm run verify:live -- <token 日志>` | **7 项通过**：模块可加载、槽位/字典/版本/错误码一致；3080 实例下发的模块组里就是本插件的当前字节 |
 | **真实沙箱端到端**（独立 DSH_HOME + 独立端口，真实模型调用） | `npm run verify:e2e` | **通过**：3 轮 scratch 会话 → `/apply` 重跑中间轮 → 后台生成+重放完成 → **追加第 4 轮提示** → 读**实时派生上下文**：提示词保序、中间回答是新生成的、后一轮是带 `originalSeq` 标记的重放副本；随后用 `tools/repair-session.mjs` 对沙箱写出的日志做**严格冷读校验：0 broken** |
 | 运行中实例挂载探针 | `npm run probe:loaded [端口]` | 通过：`/state` 返 400、`/apply` 返 405 |
@@ -151,11 +153,21 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 ### 更新日志
 
+**0.1.27** —— 修复真机中断事故：**载体写死空数组，在没有手补丁的宿主上让整个 provider 请求 400，整轮中止**。
+
+- 现场（桌面版，`session-5c3c4c12-e803-492a-b614-9a0f4c5ea6a3`，2026-10-07 16:27:33）：turn 187 中止，`turn/end → reason.error: Failed to create stream ... 400 {"message":"user message must have content","param":"messages.93.content"}`；派生消息下标 93 正是本插件的空载体（`seq 10968`，`content: []`，`source.kind = plugin:dsh-rerun-turn`）。
+- 根因：0.1.26 的设计说明断言「两个官方适配器都会丢掉空 user 消息」。该断言**只对带本地手补丁 `dsh-delete-turn:skip-empty-user` 的 pi-ai 成立**（补丁只存在于 npx 缓存副本，所以 web 宿主没事）；DSH **桌面版**（`/Applications/DeepSeek Harness.app`，运行时打在 `app.asar` 里，同一包内**没有**这一行）会把 `content: []` 转成 `{ role: 'user', content: '' }`，provider 拒绝整个请求。
+- provider 实测（当日，`https://api.cline.bot/api/v1`，`cline-pass/deepseek-v4.1-flash`）：`content: ""` → `stream_initialization_failed`；`content: []` → 同样失败；`content: "\u200b"` → 通过；`content: "ok"` → 通过。
+- 修法：形状**能力相关**——装载时从宿主入口（`process.argv[1]` 所在目录）解析 `@deepseek-ai/dsh-llm-pi-ai` 并读源码，**读到补丁标记才写空数组**（保住 0.1.26 的零 token 行为），否则写一个零宽空格；解析失败/读失败/异常一律按"没有证明"处理，即零宽空格。判定是**纯函数 + 装载时算一次**（`adapterSourceDropsEmptyUserContent` / `silentCarrierContent` / `ADAPTER_DROPS_EMPTY_USER_CONTENT`），形状经 `buildShadowWrites(plan, rerunId, promptRequestId, dropsEmptyUserContent?)` 注入，测试不依赖本机 npx 缓存与 `process.argv`。与兄弟仓库 dsh-delete-turn 的同名设计一致（同一补丁标记、同一保守默认）。
+- 连带修正：`isSilentPluginCarrier` 由「内容为空」放宽为「**没有可读文本**」（空数组，或只有零宽/空白字符的文本块）——否则零宽载体在链式重跑里会被当成人类提示词重发；`/dev/derived` 只在**有证明**时才把空 user 消息从报告里去掉（未证明时那条零宽消息就是适配器真正发出去的东西），并在响应里多一个 `carrier: { shape, adapterDropsEmptyUserContent }` 让现场一眼看出走的是哪一支。
+- 不变式：遮蔽仍是**恰好一条不占轮次的事件**、不写 turn/step 括号、不调 `syncLoopTurn`、`resolveRerunPrompt` 的 `'carrier'` 拒绝、`isRerunCarrier` 的账本跳过照旧（形状判定只看 source 标记，不看内容）。
+- 验证：**60 单测 / 29 契约 / 7 客户端全绿**；`/tmp` 副本把探测强制为"无证明"后同样全绿（证明两支都受支持）；`/tmp` 副本只还原载体行为（保留新用例）→ **恰好 2 条新用例转红**（零宽回退、零宽载体不是可重发提示词），再把探测强制为"无证明"→ 契约校验器在「无证明时不得写空载体」这条断言上转红。
+
 **0.1.26** —— 修复真机可见缺陷：**载体占了独立的轮次，屏幕上留下空的「已完成」空壳**（对话视图）+ **轮号空洞**（轨迹视图），两者同一个根因。
 
 - 现场（`session-5ce30467`）：用户对同一条提问反复点 ↻，日志里出现 turn 4/6/8/10/12——每个只有一条空 `system/message` 载体、`turn/start → step/start → 载体 → step/end → turn/end`，屏幕上就是「已完成，用时 1 秒」下面什么都没有，轨迹视图轮号 2,3,5,7,9,11,13 跳号。
 - 根因：0.1.14 起载体是**空 `system/message` + 合成簿记轮**，每重跑一次消耗一个轮号。而格式里 `system/message`/`developer/message` 只能在打开中的 turn+step 里被读（`requireStep`）、`assistant/message` 走同一检查、替换型 `tool/result` 需要打开中的轮次、`turn/start` 又必须等于 `nextTurn`（已关闭的轮次回不去）——所以**只要载体是这几种类型之一，就必须开一个轮次**。
-- 修法：载体改回**不占轮次**的空 `user/message`（`source.kind = plugin:dsh-rerun-turn`，`content: []`）。格式只对 `user/message` 不要求打开中的 turn/step；"模型看不到"这条不变——两个官方适配器都在发请求前丢掉空 user 消息（`dsh-llm-deepseek`：`role === "user" && content.length === 0 → continue`；pi-ai：同款跳过，注释里叫 `dsh-delete-turn:skip-empty-user`）。同一个形状也是 dsh-delete-turn 一直在用的静默载体，**不是新发明的写法**。
+- 修法：载体改回**不占轮次**的空 `user/message`（`source.kind = plugin:dsh-rerun-turn`，`content: []`）。格式只对 `user/message` 不要求打开中的 turn/step；"模型看不到"当时按"两个官方适配器都在发请求前丢掉空 user 消息"论证（`dsh-llm-deepseek`：`role === "user" && content.length === 0 → continue`；pi-ai：同款跳过，注释里叫 `dsh-delete-turn:skip-empty-user`）。同一个形状也是 dsh-delete-turn 一直在用的静默载体，**不是新发明的写法**。**0.1.27 更正：这条论证对 pi-ai 只成立于带本地手补丁的构建**——桌面版内置运行时没有这一行，空数组会被转成 `content: ''` 并被 provider 以 400 拒绝（`session-5c3c4c12` 真机事故），所以 0.1.27 起内容形状改为按适配器探测二选一。
 - 连带修正：`resolveRerunPrompt` 不再把"站在已退役提示词位置上的静默载体"当作可重发的提示词（空内容也过不了 prompt 准入）；重放不再复制本插件自己的载体（记账不是对话，副本只会变成空节点）；`/dev/derived` 报的是**适配器真正发出的请求**（去掉空 user 消息），不再把派生列表直接当成模型输入。宿主不再需要 `syncLoopTurn` 去迁就载体轮——载体的那次调用整个删掉了（重放之后的那次保留）。
 - 客户端：`markerTurns`/`retiredTurns` 的轮号判定除了 key 之外也读平台自己的 `data-chat-turn`——DSH 现在把过程/尾巴行按**节点 kind** 作 key（`turn-tail`、`["turn-tail","response"]`），只从 key 里抠轮号会让旧日志（以及被退役的轮）的空条留在屏幕上。
 - 验证：56 单测 / 29 契约 / 7 客户端全绿；`/tmp` 副本还原改动 → 恰好 4 条新增用例转红（2 条载体形状 + 2 条客户端隐藏），契约校验器在第一条新断言就红；**真实会话 `session-5ce30467` 全程用真机校验器（0.2.0-rc.2）验证**：原日志照旧严格冷读通过、账本输出与 0.1.25 逐字节一致；在该日志上跑一次新形状重跑（真 `Session` 追加 + 重新冷读）通过，遮蔽买的轮号数为 **0**（只有再生成轮 +1）。
@@ -351,13 +363,17 @@ This plugin does it:
   out-of-repo plugin events cannot pass the v4 format validator (unknown types
   need the `ignorable` envelope field, which `Session.append` never writes), so
   the "custom projection event" route is closed by design.
-- **Silent carrier that owns no turn** - one empty `user/message`
-  (`source.kind = plugin:dsh-rerun-turn`). `user/message` is the only surface
-  type the format reads with no open turn and no open step, and empty content is
-  dropped before the request leaves the process: the DeepSeek adapter skips
-  `role === "user" && content.length === 0`, and the pi-ai adapter carries the
-  same skip under the name `dsh-delete-turn:skip-empty-user` (the sibling
-  plugins write the identical carrier). 0.1.14-0.1.25 used an empty
+- **Silent carrier that owns no turn** - one `user/message` with no readable
+  text (`source.kind = plugin:dsh-rerun-turn`). `user/message` is the only
+  surface type the format reads with no open turn and no open step. Its content
+  shape is decided ONCE at load from the installed adapter (0.1.27): an empty
+  content list only where the adapter is proven to drop a user message whose
+  content converts to nothing (the DeepSeek adapter natively; the pi-ai adapter
+  only under the local hand patch `dsh-delete-turn:skip-empty-user`), and one
+  zero-width space otherwise - an unpatched pi-ai turns `content: []` into
+  `{ role: 'user', content: '' }`, which the provider refuses with HTTP 400
+  `user message must have content` and which aborts the whole turn (real
+  desktop-app incident, 2026-10-07). 0.1.14-0.1.25 used an empty
   `system/message` inside a synthetic bookkeeping turn instead, which spent one
   turn number per rerun: a bare "completed" strip in the transcript and a hole
   in the trajectory numbering (fixed in 0.1.26).
@@ -428,21 +444,28 @@ utility repairs logs written by 0.1.0.
 0.1.14 traded that away to keep the carrier out of the model input entirely
 (empty `system/message` in a synthetic turn) and paid a turn number per rerun:
 an empty "completed, 1s" strip under the fresh answer, and a hole in the
-trajectory numbering. The format leaves exactly one turn-free carrier shape -
-an empty `user/message` - because `system/message` and `developer/message`
-are step events (they need an open turn AND step), `assistant/message` goes
-through the same check, a replacement `tool/result` needs an open turn, and
-`turn/start` must equal `nextTurn`, so a turn already closed can never be
-re-entered. 0.1.26 takes that shape and keeps the invisibility by leaving the
-content EMPTY (not a zero-width space, which the model did read and comment
-on in 0.1.13).
+trajectory numbering. The format leaves exactly one turn-free carrier shape - a
+`user/message` - because `system/message` and `developer/message` are step
+events (they need an open turn AND step), `assistant/message` goes through the
+same check, a replacement `tool/result` needs an open turn, and `turn/start`
+must equal `nextTurn`, so a turn already closed can never be re-entered. 0.1.26
+took that shape and kept the invisibility by leaving the content EMPTY - on the
+assumption that both shipped adapters drop an empty user message. 0.1.27
+corrects the assumption: only a pi-ai build carrying the local hand patch
+`dsh-delete-turn:skip-empty-user` drops it, and the DSH desktop app bundles an
+unpatched one. An empty list there becomes `content: ''` on the wire and the
+provider refuses the whole request (`400 user message must have content`), so
+the content shape is now capability-aware: empty only where the load-time probe
+proves the drop, one zero-width space otherwise. A zero-width space is text and
+does reach the model (the 0.1.13 measurement stands) - that is the price, and it
+is far below the cost of an aborted turn.
 
 ### Verification status
 
 | Check | Command | Result |
 |---|---|---|
-| Unit tests (host logic + client DOM stub: injection, hiding, re-apply, turn-free carrier) | `npm test` | 56 passed |
-| Real-validator contract (encode/restore round-trip) | `npm run verify:contract` | 29 passed: the rerun log survives the v4 vocabulary/relationship/lifecycle validators plus `Session.fromRestore`; the derived context is exactly **A B C1' D' E'** (the wire view drops the empty carriers); the shadow buys no turn number and no turn in the finished log holds only bookkeeping; the reported "same reply, three reruns" shape; chained reruns; crash-resume; admission-failure fallback; `TOOL_NOT_STARTED` fidelity |
+| Unit tests (host logic + client DOM stub: injection, hiding, re-apply, turn-free carrier, both carrier content shapes) | `npm test` | 60 passed |
+| Real-validator contract (encode/restore round-trip) | `npm run verify:contract` | 29 passed: the rerun log survives the v4 vocabulary/relationship/lifecycle validators plus `Session.fromRestore`; the derived context is exactly **A B C1' D' E'** (the wire view drops the silent carriers); the shadow buys no turn number and no turn in the finished log holds only bookkeeping; the carrier shape matches this host's adapter probe (never empty without the proof); the reported "same reply, three reruns" shape; chained reruns; crash-resume; admission-failure fallback; `TOOL_NOT_STARTED` fidelity |
 | Client statics + live delivery bytes | `npm run verify:client` / `verify:live` | 7 passed |
 | **Real sandbox end-to-end** (isolated DSH_HOME/port, real model calls) | `npm run verify:e2e` | Passed: a 3-turn scratch session, the middle turn rerun via `/apply`, background regeneration + replay, and the **live derived context** asserted to be the spliced order with a marked replay copy |
 | Mounted-instance probe | `npm run probe:loaded [port]` | Passed |
@@ -470,11 +493,21 @@ button before relying on it.
 
 ### Changelog
 
+**0.1.27** — Fixed a real-machine abort: **the carrier was hard-coded to an empty content list, which made an unpatched host send an invalid request and abort the whole turn**.
+
+- Field evidence (desktop app, `session-5c3c4c12-e803-492a-b614-9a0f4c5ea6a3`, 2026-10-07 16:27:33): turn 187 aborted with `turn/end → reason.error: Failed to create stream ... 400 {"message":"user message must have content","param":"messages.93.content"}`; derived-message index 93 was exactly this plugin's empty carrier (`seq 10968`, `content: []`, `source.kind = plugin:dsh-rerun-turn`).
+- Root cause: the 0.1.26 design note claimed "both shipped adapters drop a user message whose content converts to nothing". That is true only for a pi-ai build carrying the local hand patch `dsh-delete-turn:skip-empty-user`, which lives in the npx cache copy the web host loads - the **DSH desktop app** (`/Applications/DeepSeek Harness.app`, runtime bundled in `app.asar`) has no such line, maps `content: []` to `{ role: 'user', content: '' }`, and the provider refuses the whole request.
+- Provider measurement (same day, `https://api.cline.bot/api/v1`, `cline-pass/deepseek-v4.1-flash`): `content: ""` → `stream_initialization_failed`; `content: []` → same failure; `content: "\u200b"` → accepted; `content: "ok"` → accepted.
+- Fix: the shape is capability-aware. At load the plugin resolves `@deepseek-ai/dsh-llm-pi-ai` from the running host's entry point (`process.argv[1]`'s directory) and reads the source; the EMPTY list survives exactly where the patch marker is present (keeping 0.1.26's zero-token behaviour), and one zero-width space is written otherwise. A failed resolution, an unreadable file or any exception means "not proven" and therefore the zero-width carrier. The decision is pure and testable (`adapterSourceDropsEmptyUserContent`, `silentCarrierContent`, the load-time `ADAPTER_DROPS_EMPTY_USER_CONTENT`), and the shape is injected through `buildShadowWrites(plan, rerunId, promptRequestId, dropsEmptyUserContent?)` so no test depends on this machine's npx cache or on `process.argv`. Same design and same patch marker as the sibling dsh-delete-turn repository.
+- Also: `isSilentPluginCarrier` now means "no readable text" (empty, or text blocks holding only whitespace/zero-width characters) instead of "exactly empty" - otherwise a zero-width carrier would read as a human prompt to a chained rerun; `/dev/derived` drops the empty user message only where the proof exists (without it, the zero-width message IS what the adapter sends) and reports `carrier: { shape, adapterDropsEmptyUserContent }` so the branch in play is visible.
+- Invariants kept: the shadow is still exactly ONE turn-less event, with no turn/step bracket of its own, no `syncLoopTurn` around it, `resolveRerunPrompt`'s `'carrier'` rejection, and the `isRerunCarrier` ledger skip (the mark is the source kind, never the content).
+- Verification: **60 unit / 29 contract / 7 client checks green**; a `/tmp` copy with the probe forced to "not proven" is green too (both branches supported); reverting only the carrier behaviour in a `/tmp` copy (new cases kept) turns exactly **2 new cases red** (the zero-width fallback, and the zero-width carrier no longer being offered as a prompt), and forcing the probe to "not proven" there turns the contract verifier red on "an unproven host must not write an empty carrier".
+
 **0.1.26** — Fixed a user-visible defect: **the carrier occupied a turn of its own, leaving an empty "completed" shell on screen** in the conversation view and a numbering hole in the trajectory view - one root cause, two symptoms.
 
 - Field evidence (`session-5ce30467`, real machine): pressing ↻ on the same reply repeatedly produced turns 4/6/8/10/12 holding one empty `system/message` carrier each, which render as "completed, 1s" with nothing under it while the turn numbers skip 4/6/8/10/12.
 - Root cause: since 0.1.14 the carrier was an empty `system/message` inside a synthetic bookkeeping turn. The format reads `system/message`/`developer/message` only inside an open turn AND step (`requireStep`), `assistant/message` goes through the same check, a replacement `tool/result` needs an open turn, and `turn/start` must equal `nextTurn` - so any of those carrier types must open a turn.
-- Fix: back to a **turn-free** empty `user/message` (`source.kind = plugin:dsh-rerun-turn`, `content: []`); `user/message` is the only surface type with no turn/step requirement. Invisibility is preserved: both shipped adapters drop an empty user message before the request is built. It is also the exact shape dsh-delete-turn has been writing all along.
+- Fix: back to a **turn-free** `user/message` (`source.kind = plugin:dsh-rerun-turn`, `content: []`); `user/message` is the only surface type with no turn/step requirement. Invisibility was argued from "both shipped adapters drop an empty user message before the request is built" - **0.1.27 corrects that**: it holds for pi-ai only where the local hand patch `dsh-delete-turn:skip-empty-user` is present, and the desktop app's bundled runtime has no such line, so the content shape became capability-aware. It is also the exact shape dsh-delete-turn has been writing all along.
 - Also: `resolveRerunPrompt` no longer accepts a silent carrier as a re-sendable prompt; the replay no longer copies this plugin's own carriers; `/dev/derived` reports the request the adapters really send; the host no longer has to sync the loop's counter around the carrier.
 - Client: the turn lookup for `markerTurns`/`retiredTurns` now also reads the platform's own `data-chat-turn`, because DSH keys those rows by node kind (`turn-tail`, `["turn-tail","response"]`).
 

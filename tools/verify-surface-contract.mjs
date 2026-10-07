@@ -27,6 +27,18 @@ const { sessionFormatCatalog } = await import('@deepseek-ai/dsh-session-format-c
 
 const PLUGIN = await import('../lib/index.js')
 
+// The carrier's CONTENT shape is a property of the host, not of the contract
+// (0.1.27): an empty list where the installed pi-ai adapter proves it drops a
+// user message whose content converts to nothing, one zero-width space
+// otherwise. An unpatched adapter turns `content: []` into
+// `{ role: 'user', content: '' }` and the provider refuses the whole request
+// ("user message must have content"), so the empty list may not be assumed.
+// Both shapes are turn-free, both are recognised by `isRerunCarrier`, and
+// `derivedShape` renders both as the carrier. These checks therefore pin the
+// shape to the same load-time decision the host half makes, and hold on a
+// patched and on an unpatched machine alike.
+const CARRIER_CONTENT = PLUGIN.silentCarrierContent(PLUGIN.ADAPTER_DROPS_EMPTY_USER_CONTENT)
+
 const uid = (prefix) => `${prefix}-${randomUUID()}`
 
 let passed = 0
@@ -152,12 +164,16 @@ function firstTurn(session, prompt, reply) {
 }
 
 // Derived context as a compact, comparable shape: `role:text` per message.
-// An EMPTY user message is this plugin's (and its siblings') silent replacement
-// carrier: it is on the surface, and `deriveMessages()` returns it, but no
-// shipped adapter puts it on the wire - dsh-llm-deepseek skips
-// `role === "user" && content.length === 0`, and the pi-ai adapter has the same
-// skip under the name `dsh-delete-turn:skip-empty-user`. So the derivation is
-// rendered as `user:<carrier>` and the wire view drops exactly those rows.
+// The silent replacement carrier this plugin (and its siblings) writes is a
+// user message with no readable text: an EMPTY one where the installed adapter
+// is proven to drop it, one zero-width space otherwise (0.1.27). It is on the
+// surface, and `deriveMessages()` returns it, but no adapter puts a READABLE
+// message on the wire for it - dsh-llm-deepseek always skips
+// `role === "user" && content.length === 0`, the pi-ai adapter does the same
+// under the name `dsh-delete-turn:skip-empty-user`, and where that proof is
+// missing the single zero-width space is the price the provider accepts. So the
+// derivation is rendered as `user:<carrier>` in both shapes and the wire view
+// drops exactly those rows.
 function derivedShape(session) {
   return session.deriveMessages().map((message) => {
     if (message.role === 'user' && message.content.length === 0) return 'user:<carrier>'
@@ -310,9 +326,19 @@ console.log('dsh-rerun-turn surface contract')
     )
     const carrier = afterShadow[afterShadow.length - 1]
     assert.equal(carrier.type, 'user/message')
-    assert.equal(carrier.data.content.length, 0, 'no content for the model to read')
+    assert.deepEqual(carrier.data.content, CARRIER_CONTENT, 'the carrier holds no readable text')
+    if (!PLUGIN.ADAPTER_DROPS_EMPTY_USER_CONTENT) {
+      // The whole point of 0.1.27: without the adapter proof the carrier may not
+      // be empty, because an unpatched adapter converts `content: []` to
+      // `content: ''` and the provider refuses the request outright.
+      assert.ok(
+        carrier.data.content.length > 0,
+        'an unproven host must not write an empty carrier (the provider refuses content: "")',
+      )
+    }
     assert.equal(carrier.data.turn, undefined, 'a user carrier carries no turn coordinate')
     assert.equal(PLUGIN.isRerunCarrier(carrier), true)
+    assert.equal(PLUGIN.isSilentPluginCarrier(carrier), true, 'a text-free plugin carrier is never a prompt')
   })
   ok('plan targets the whole turn C window', () => {
     assert.equal(plan.turn, 3)
@@ -403,7 +429,29 @@ console.log('dsh-rerun-turn surface contract')
       'user:F',
       'assistant:F1',
     ])
-    // The carrier is the ONLY empty message in the derivation, and it sits where
+    // No empty user message is left in the derived request unless this host can
+    // prove its adapter drops one; without that proof the carrier is the single
+    // zero-width user message instead (0.1.27, see CARRIER_CONTENT).
+    const derivedMessages = reloaded.deriveMessages()
+    const emptyUserMessages = derivedMessages.filter(
+      (message) => message.role === 'user' && message.content.length === 0,
+    )
+    assert.equal(
+      emptyUserMessages.length,
+      PLUGIN.ADAPTER_DROPS_EMPTY_USER_CONTENT ? 1 : 0,
+      'an empty user message exists only where the adapter is proven to drop it',
+    )
+    if (!PLUGIN.ADAPTER_DROPS_EMPTY_USER_CONTENT) {
+      const fallbackCarriers = derivedMessages.filter(
+        (message) =>
+          message.role === 'user' &&
+          message.content.length === 1 &&
+          message.content[0].type === 'text' &&
+          message.content[0].text === PLUGIN.CARRIER_ZWSP,
+      )
+      assert.equal(fallbackCarriers.length, 1, 'the fallback carrier is one zero-width user message')
+    }
+    // The carrier is the ONLY blank message in the derivation, and it sits where
     // the old window was - right before the re-sent prompt.
     const raw = derivedShape(reloaded)
     assert.deepEqual(
@@ -1040,17 +1088,18 @@ console.log('dsh-rerun-turn surface contract')
     assert.equal(finalEvents.filter((event) => PLUGIN.isRerunCarrier(event)).length, 3)
     assert.deepEqual(emptyTurnBrackets(finalEvents, reloaded), [])
   })
-  ok('every carrier is an empty user message no adapter sends', () => {
+  ok('every carrier holds no readable text, in the shape this host proves safe', () => {
     const carriers = finalEvents.filter((event) => PLUGIN.isRerunCarrier(event))
     assert.equal(carriers.length, 3)
     for (const carrier of carriers) {
       assert.equal(carrier.type, 'user/message')
-      assert.equal(carrier.data.content.length, 0)
+      assert.deepEqual(carrier.data.content, CARRIER_CONTENT)
+      assert.equal(PLUGIN.isSilentPluginCarrier(carrier), true, 'no carrier is ever offered as a prompt')
       assert.equal(carrier.data.source.kind, 'plugin:dsh-rerun-turn')
       assert.equal(carrier.data.turn, undefined)
     }
     const shape = derivedShape(reloaded)
-    assert.equal(shape.filter((row) => row === 'user:<carrier>').length, 3, 'the carriers are the only empty rows')
+    assert.equal(shape.filter((row) => row === 'user:<carrier>').length, 3, 'the carriers are the only blank rows')
     // Each rerun re-sends its own prompt and replays the single surviving tail
     // turn, so the conversation stays two exchanges long however many times the
     // button is pressed - exactly what the 0.1.25 log derived, minus the

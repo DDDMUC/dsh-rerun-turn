@@ -2,12 +2,13 @@
 
 本仓库是 DSH web 插件 **dsh-rerun-turn** 的唯一正本，经 `~/.dsh/profiles/web` 符号链接装到用户实例。改动前请先读本文件。
 
-## 当前状态（2026-10-06）
+## 当前状态（2026-10-07）
 
-- 版本 **0.1.26**；`lib/index.js`、`lib/client.js`、`package.json` 三处版本号必须一致。
-- 改完必须本地全绿：`npm test && npm run verify:contract && npm run verify:client`（当前 **56** 单测 / **29** 契约 / 7 客户端检查；单测 = 宿主 + 客户端 DOM + 跨插件契约 + 轮次 bracket/seq 索引 + 载体不占轮次，由 0.1.21~0.1.26 多轮加固带入 —— 原记 17、26、42、49、50、53 均为过期值）。
-- 广告与规划**必须**共用 `resolveRerunPrompt`（0.1.24 起）；该函数现在还负责「静默载体不是提示词」（0.1.26 起）。详见文末。
-- **载体不占轮次**（0.1.26 起，回到 0.1.1 的设计）：遮蔽载体是一条空 `user/message`（`content: []`、`source.kind = plugin:dsh-rerun-turn`），不写 turn/step 括号、不调 `syncLoopTurn`。0.1.14-0.1.25 的"空 system/message + 合成簿记轮"会让每重跑一次多一个没有内容的轮次（屏幕上是空的「已完成」条，轨迹视图跳号），不要再改回去；详见文末交接。
+- 版本 **0.1.27**；`lib/index.js`、`lib/client.js`、`package.json` 三处版本号必须一致。
+- 改完必须本地全绿：`npm test && npm run verify:contract && npm run verify:client`（当前 **60** 单测 / **29** 契约 / 7 客户端检查；单测 = 宿主 + 客户端 DOM + 跨插件契约 + 轮次 bracket/seq 索引 + 载体不占轮次 + 载体两种内容形状，由 0.1.21~0.1.27 多轮加固带入 —— 原记 17、26、42、49、50、53、56 均为过期值）。
+- 广告与规划**必须**共用 `resolveRerunPrompt`（0.1.24 起）；该函数现在还负责「静默载体不是提示词」（0.1.26 起；0.1.27 起「静默」= 没有可读文本，而不是"内容为空"）。详见文末。
+- **载体不占轮次**（0.1.26 起，回到 0.1.1 的设计）：遮蔽载体是一条**没有可读文本**的 `user/message`（`source.kind = plugin:dsh-rerun-turn`），不写 turn/step 括号、不调 `syncLoopTurn`。0.1.14-0.1.25 的"空 system/message + 合成簿记轮"会让每重跑一次多一个没有内容的轮次（屏幕上是空的「已完成」条，轨迹视图跳号），不要再改回去；详见文末交接。
+- **载体内容两态**（0.1.27 起）：装载时探测已安装的 `@deepseek-ai/dsh-llm-pi-ai` —— **读到 `dsh-delete-turn:skip-empty-user` 才写 `content: []`，否则写一个零宽空格**。写死空数组会让未打补丁的宿主（DSH 桌面版）发出 `content: ''`，provider 400 并**中断整轮**（真机事故，见文末 0.1.27 交接）。
 - 远端正本：GitHub `DDDMUC/dsh-rerun-turn`。本地有提交后请同步（git 直连在本机不通时，用 GitHub REST API 推 blobs→tree→commit→ref，**blob 请求必须带 `"encoding":"base64"`**，否则会把 base64 文本当文件存）。
   - 2026-10-01 实测补充：本机 `github.com:443` 会超时（`Failed to connect` / `curl 28 Operation too slow`），但 `api.github.com` 正常（0.3s）。走 API 时 **commit 的 `date` 必须是 ISO 8601 且保留原时区偏移**（git 存的是 `<epoch> <±HHMM>`；直接送 `1790835054 +0800` 会 422，归一化成 `Z` 会让 sha 变掉）。把 tree/parents/author/committer/message 原样回填后，API 生成的新 commit **sha 与本地完全一致**，分支不会分叉 —— 2026-10-01 的 fc4f702 就是这样推上去的。
 
@@ -31,14 +32,14 @@ dsh-edit-turn **0.2.12+** 的提示词编辑器里有一个「重跑」按钮：
 好让重跑用**改后的文本**生成。它只走公开回环路由，不碰我们的 client/DOM；反过来，纯 dsh-edit-turn（没装我们）
 没有任何重跑入口。它依赖以下形状 —— 全部由 `test/contract.test.js`（16 例）钉死：
 
-| # | 形状 | 现状（file:line） |
+| # | 形状 | 现状（file:line，2026-10-07 复核） |
 | --- | --- | --- |
-| 1 | **挂载探测**：不带 sessionId 的 `GET /state` 在挂载时答 **400**（它按 400/405=装着、404=没装；改语义按钮会静默消失） | `lib/index.js:1810`、`:1976` |
-| 2 | **目标解析**：`/state` 返回 `replies[]`，元素形如 `{seq, turn}`（它取被编辑那一轮里 seq 最大者） | `lib/index.js:1056`、`:1622` |
-| 3 | **调用形状**：`POST /apply` 只要求 `sessionId` + (`seq` \| `messageId`)，**不得新增必填参数**（确认令牌之类会让链式调用直接失败） | `lib/index.js:2022` |
-| 4 | **不收文本、忽略未知字段**：它不传文本；额外观测字段被忽略，不报 400 | `lib/index.js:2023` |
-| 5 | **错误码机读且稳定**：`invalid` / `busy` / `rerunning` / `stale` / `session-not-found` / `session-not-active` / `not-rerunnable` / `already-retired` / `attachments-unsupported` —— 它原样提示给用户 | `lib/index.js:1650-1656`（RerunPlanError → HttpError 保留 code）、`:1815` |
-| 6 | **链式解析**：`planRerun` 继续沿 `source.kind = plugin:dsh-edit-turn` 的就地替换链读活节点 | 回归见 `test/logic.test.js:357`（单跳）、`:619`（两跳） |
+| 1 | **挂载探测**：不带 sessionId 的 `GET /state` 在挂载时答 **400**（它按 400/405=装着、404=没装；改语义按钮会静默消失） | `lib/index.js:2381`（路由）、`:2389`（`requireSessionId` 抛 → `failure` 映射，`:2196`、`:2202`） |
+| 2 | **目标解析**：`/state` 返回 `replies[]`，元素形如 `{seq, turn}`（它取被编辑那一轮里 seq 最大者） | `lib/index.js:1953`（`stateOf`）、`:1962`（`rerunnableReplies` 调用）、`:1971`（返回 `replies`）、`:1409`（广告实现） |
+| 3 | **调用形状**：`POST /apply` 只要求 `sessionId` + (`seq` \| `messageId`)，**不得新增必填参数**（确认令牌之类会让链式调用直接失败） | `lib/index.js:2419`（路由）、`:2435` |
+| 4 | **不收文本、忽略未知字段**：它不传文本；额外观测字段被忽略，不报 400 | `lib/index.js:2436`（`applyRerun` 只读 `seq`/`messageId`）、`:2034-2037` |
+| 5 | **错误码机读且稳定**：`invalid` / `busy` / `rerunning` / `stale` / `session-not-found` / `session-not-active` / `not-rerunnable` / `already-retired` / `attachments-unsupported` —— 它原样提示给用户 | `lib/index.js:2039`（RerunPlanError → HttpError 保留 code）、`:2202`（`failure`）、`:2048`（stale） |
+| 6 | **链式解析**：`planRerun` 继续沿 `source.kind = plugin:dsh-edit-turn` 的就地替换链读活节点 | 回归见 `test/logic.test.js:547`（单跳）、`:797`（两跳） |
 
 **改动前的纪律**：任何触及路由、`planRerun`、错误码的改动，先跑 `node --test test/contract.test.js`。
 该文件的断言经过变异验证（在 `/tmp` 副本上做，仓库文件不动）：把探测的 400 改成 404 → 2 例转红；给 `/apply`
@@ -178,6 +179,8 @@ promptRequestId)` 只返回一条写）。"模型看不到"由另一条官方保
 （`dsh-llm-deepseek/lib/index.js`：`if (message.role === "user" && content.length === 0) continue`；
 pi-ai 同款，注释就叫 `dsh-delete-turn:skip-empty-user`）。内容必须是**空数组**——零点宽空格是文本，
 会进模型输入（0.1.13 的实测结论）。
+**⚠️ 0.1.27 更正（2026-10-07）：这两句里"pi-ai 同款"只对带本地手补丁的构建成立**——桌面版内置运行时没有那一行，
+空数组被转成 `content: ''`，provider 400 并中断整轮。0.1.27 起形状按装载时探测二选一，详见文末最后一节。
 
 **连带改动**（都在宿主半侧，客户端只有一处）：
 
@@ -219,3 +222,69 @@ node /tmp/verify-real-session.mjs      # 需要先把会话解成 /tmp/session-5
 
 **如果你要把载体改回开轮次**：先读上面「根因」——除了空洞和空壳，你还要把 `syncLoopTurn` 加回来，并且在
 "再生成轮号 = 载体轮 + 1"上重新验证冷读；这是 0.1.0 事故的复现路径。
+
+## 交接：0.1.27「载体内容按宿主适配器能力二选一」（2026-10-07，Lead）
+
+**你接手时先读这一节。** 版本 **0.1.27**（三处已一致）；**60** 单测 / **29** 契约 / 7 客户端检查全绿。
+
+### 出了什么事（真机整轮中止，不是外观问题）
+
+- 现场：`~/.dsh/sessions/--Users-337mu-Documents-Default~0020Project--/session-5c3c4c12-e803-492a-b614-9a0f4c5ea6a3`，
+  turn 187（2026-10-07 16:27:33）`turn/end → reason.error: Failed to create stream ... 400 {"message":"user message must have content","param":"messages.93.content"}`。
+  派生消息下标 93 正是本插件的遮蔽载体：事件 `seq 10968` = `{"type":"user/message","data":{"role":"user","content":[],"source":{"kind":"plugin:dsh-rerun-turn",…}}}`。
+- 根因：0.1.26 把「空 user 消息会被两个官方适配器丢掉」当成了普适事实。它**只对带本地手补丁
+  `dsh-delete-turn:skip-empty-user` 的 pi-ai 成立**；补丁只在 npx 缓存副本里（web 宿主没事），
+  **DSH 桌面版**（`/Applications/DeepSeek Harness.app`，运行时打在 `app.asar`）没有这一行——
+  `content: []` 被转成 `{ role: 'user', content: '' }`，provider 拒绝整个请求。
+- provider 实测（当日，`https://api.cline.bot/api/v1`，`cline-pass/deepseek-v4.1-flash`，与失败会话同路）：
+  `content: ""` → `stream_initialization_failed`；`content: []` → 同样失败；`content: "\u200b"` → **通过**；
+  `content: "ok"` → 通过。
+- 只读复核（本次改动时重做）：`grep -c 'dsh-delete-turn:skip-empty-user' <app.asar>` = **0**
+  （同一 asar 里 `dsh-llm-pi-ai` 出现 70 次，说明 grep 有效）；npx 缓存那份 `dsh-llm-pi-ai/lib/index.js`
+  `marker = true`。
+
+### 修法（都在宿主半侧；客户端没改）
+
+1. `buildShadowWrites(plan, rerunId, promptRequestId, dropsEmptyUserContent = ADAPTER_DROPS_EMPTY_USER_CONTENT)`
+   —— 形状是**第 4 个可选参数**，默认取装载时算一次的探测结果。测试传布尔值，不碰本机 npx 缓存、不碰 `process.argv`。
+2. 纯函数三件套（都导出）：`ADAPTER_PATCH_MARKER`（`'dsh-delete-turn:skip-empty-user'`）、
+   `adapterSourceDropsEmptyUserContent(adapterSource)`（源码文本 → 布尔）、
+   `silentCarrierContent(dropsEmptyUserContent)`（布尔 → `[]` 或 `[{ type:'text', text:'\u200b' }]`，
+   **非 `true` 一律走零宽**）；另有 `probeAdapterDropsEmptyUserContent()` 从 `process.argv[1]` 所在目录解析
+   `@deepseek-ai/dsh-llm-pi-ai` 并读文件，**任何异常都是"没有证明"**。
+3. `isSilentPluginCarrier` 由「`content.length === 0`」放宽为「**没有可读文本**」：空数组，或文本块只含
+   空白/零宽字符（`INVISIBLE_TEXT_RE`）。非文本块（图片/文件）仍算可读。**这条是必需的**：不放宽的话，
+   零宽载体在链式重跑里会被 `resolveRerunPrompt` 当成人类提示词重发。
+4. `/dev/derived`：只在**有证明**时才把空 user 消息从报告里滤掉（没证明时那条零宽消息**就是**适配器发出的东西，
+   如实报告），并新增 `carrier: { shape: 'empty' | 'zero-width-space', adapterDropsEmptyUserContent }`。
+   `tools/verify-live-e2e.mjs` 的「没有空白 user 消息进模型」断言按这个字段分支。
+5. 契约校验器 `tools/verify-surface-contract.mjs` 的载体断言改为与本机探测一致
+   （`CARRIER_CONTENT = PLUGIN.silentCarrierContent(PLUGIN.ADAPTER_DROPS_EMPTY_USER_CONTENT)`），并在
+   「派生上下文恰好 A B C1' D' E'」一例里钉死：**没有证明时派生请求里不得存在空 user 消息**。
+
+### 不变式（0.1.26 原样保留，别动）
+
+- 遮蔽仍是**恰好一条不占轮次的事件**、不写 turn/step 括号、不调 `syncLoopTurn`；`resolveRerunPrompt` 的
+  `'carrier'` 拒绝、`isRerunCarrier` 的账本/重放跳过照旧 —— 形状判定**只看 source 标记，不看内容**。
+- **要改回空载体，必须先证明当前安装的适配器会丢掉它**：`node -e` 解析 pi-ai 并检查标记，或跑一次真机轮次
+  看 provider 是否 400。没有证明就是零宽空格。
+
+### 验收与负向验证（本次实测数字）
+
+~~~sh
+cd dsh-rerun-turn
+npm test && npm run verify:contract && npm run verify:client      # 60 / 29 / 7
+
+# 另一支也必须绿：/tmp 副本把 ADAPTER_DROPS_EMPTY_USER_CONTENT 强制为 false
+#   /tmp/dsh-rerun-turn-zwsp      → 60 / 29 / 7 全绿（证明两支都受支持）
+# 负向：/tmp 副本只还原载体行为（silentCarrierContent 恒返回 []、isSilentPluginCarrier 要求精确为空），
+#       保留全部新用例 → 恰好 2 条新用例转红：
+#         「without the adapter proof the carrier falls back to one zero-width space」
+#         「a fallback carrier standing where the prompt was is not a re-sendable prompt」
+#       再把探测强制为 false → 契约校验器在「an unproven host must not write an empty carrier」转红。
+#   /tmp/dsh-rerun-turn-negative
+~~~
+
+**仍未验证（诚实说明）**：桌面版（`app.asar`）里的探测**没有真机跑过**——只读复核了 asar 里没有补丁标记，
+但没有在 Electron 运行时里执行 `createRequire(...).resolve(...)`。探测失败的方向是安全的（→ 零宽空格，
+provider 接受）。按惯例：改 `lib/client.js` 要重启宿主 + 硬刷新页面，本次客户端只动了版本号。
