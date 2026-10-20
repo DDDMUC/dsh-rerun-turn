@@ -390,6 +390,64 @@ test('buildReplayWrites renumbers turns, marks copies, and drops usage and strea
   )
 })
 
+test('buildReplayWrites carries edit-turn text patches into copied later turns', () => {
+  const { events, seqs } = standardLog()
+  const patch = {
+    type: P.EDIT_TURN_PATCH_TYPE,
+    seq: events.length,
+    time: 1,
+    data: { version: 1, targets: [{ seq: seqs.d1.seq, blockIndex: 0, kind: 'text', text: 'D1 edited' }] },
+  }
+  const log = [...events, patch]
+  const plan = P.planRerun(log, surfaceOf(log), { seq: seqs.c1.seq })
+  const writes = P.buildReplayWrites(log, plan, 7, 'rerun-1', 100, true)
+  const copy = writes.find((write) =>
+    write.type === 'assistant/message' && write.data.message.source.originalSeq === seqs.d1.seq)
+  assert.ok(copy, 'the later answer is replayed')
+  assert.equal(copy.data.message.content[0].text, 'D1 edited',
+    'the copy carries the edit instead of the recorded text')
+  assert.equal(copy.data.message.content[0].type, 'text')
+  assert.equal(events[seqs.d1.seq].data.message.content[0].text, 'D1', 'the recorded event is untouched')
+})
+
+test('a reasoning patch carried into a copy drops the stale signature', () => {
+  const { events, seqs } = standardLog()
+  events[seqs.d1.seq].data.message.content.unshift({ type: 'thinking', text: 'old thought', signature: 'sig-1', thinkingSignature: 'sig-2' })
+  const patch = {
+    type: P.EDIT_TURN_PATCH_TYPE,
+    seq: events.length,
+    time: 1,
+    data: { version: 1, targets: [{ seq: seqs.d1.seq, blockIndex: 0, kind: 'reasoning', text: 'new thought' }] },
+  }
+  const log = [...events, patch]
+  const plan = P.planRerun(log, surfaceOf(log), { seq: seqs.c1.seq })
+  const writes = P.buildReplayWrites(log, plan, 7, 'rerun-1', 100, true)
+  const copy = writes.find((write) =>
+    write.type === 'assistant/message' && write.data.message.source.originalSeq === seqs.d1.seq)
+  assert.equal(copy.data.message.content[0].text, 'new thought')
+  assert.equal(copy.data.message.content[0].signature, undefined)
+  assert.equal(copy.data.message.content[0].thinkingSignature, undefined)
+  assert.equal(copy.data.message.content[1].text, 'D1', 'the untouched block stays')
+})
+
+test('malformed or stale edit-turn patches are ignored, and the latest patch wins', () => {
+  const { events, seqs } = standardLog()
+  const base = events.length
+  const log = [
+    ...events,
+    { type: P.EDIT_TURN_PATCH_TYPE, seq: base, time: 1, data: { version: 1, targets: [{ seq: seqs.d1.seq, blockIndex: 0, kind: 'text', text: 'first' }] } },
+    { type: P.EDIT_TURN_PATCH_TYPE, seq: base + 1, time: 1, data: { version: 1, targets: [{ seq: seqs.d1.seq, blockIndex: 0, kind: 'text', text: 'second' }] } },
+    { type: P.EDIT_TURN_PATCH_TYPE, seq: base + 2, time: 1, data: { broken: true } },
+    { type: P.EDIT_TURN_PATCH_TYPE, seq: base + 3, time: 1, data: { version: 9, targets: [] } },
+    { type: P.EDIT_TURN_PATCH_TYPE, seq: base + 4, time: 1, data: { version: 1, targets: [{ seq: 9999, blockIndex: 0, kind: 'text', text: 'elsewhere' }] } },
+  ]
+  const plan = P.planRerun(log, surfaceOf(log), { seq: seqs.c1.seq })
+  const writes = P.buildReplayWrites(log, plan, 7, 'rerun-1', 100, true)
+  const copy = writes.find((write) =>
+    write.type === 'assistant/message' && write.data.message.source.originalSeq === seqs.d1.seq)
+  assert.equal(copy.data.message.content[0].text, 'second', 'latest valid patch wins')
+})
+
 test('buildReplayWrites remaps tool result sourceEventSeqs onto the copies', () => {
   const { events, seqs } = standardLog()
   // Replay turn 2 itself (the failed-admission path replays from the turn

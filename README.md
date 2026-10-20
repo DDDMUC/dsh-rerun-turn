@@ -22,7 +22,7 @@ DSH 的模型上下文是每次调用从会话 surface 重新推导的。官方�
 ### 特性
 
 - **中缀重跑（本插件的全部意义）** —— 重放把后续轮次以官方事件写回日志，冷读、导出、其他实例看到的内容与模型上下文完全一致。不是"改画面"，是真的上下文。
-- **只用官方缝** —— 遮蔽是一条标准的 `surfaceOp: { op: 'replace', startSeq, endSeq }` 替换事件（与 `/compact` 同一契约）；重放是普通的 `append` 事件。**没有自定义事件类型**——外挂插件的事件无法通过 v4 格式校验（未知类型必须带 `ignorable`，而 `Session.append` 不写这个字段），这条约束直接排除了"自定义投影事件"的路线。
+- **只用官方缝** —— 遮蔽是一条标准的 `surfaceOp: { op: 'replace', startSeq, endSeq }` 替换事件（与 `/compact` 同一契约）；重放是普通的 `append` 事件。**本插件仍然不写自定义事件类型**。宿主 0.2.1-rc.2 已有官方的 `appendPluginRecord` + `registerMessageProjection`（`dsh-edit-turn` 0.3.0 用它做回复块的就地补丁）；重跑没有采用，原因见下面的「为什么重跑仍然必须重放」。
 - **静默载体，且不占轮次** —— 遮蔽载体是一条**没有可读文本的 `user/message`**（`source.kind = plugin:dsh-rerun-turn`），它**不开轮次、不开步骤**：格式里只有 `user/message` 不需要打开中的 turn/step。它的**内容形状由装载时对已安装适配器的一次探测决定**（0.1.27）：只有证明「当前适配器会丢掉空 user 消息」时才写**空数组**（deepseek 适配器天然如此；pi-ai 需要本地手补丁 `dsh-delete-turn:skip-empty-user`），否则写**一个零宽空格**——未打补丁的 pi-ai 会把 `content: []` 变成 `{ role: 'user', content: '' }`，provider 直接 HTTP 400 `user message must have content` 并**中断整轮**（2026-10-07 桌面版真机事故）。0.1.14-0.1.25 用的是"空 `system/message` + 合成簿记轮"，那一版每重跑一次就花掉一个轮号：对话视图里留下一条空的「已完成」条，轨迹视图轮号出现空洞（0.1.26 修）。
 - **重放保真** —— 逐事件复制：轮次括号、用户消息、助手消息（含思考与工具调用块）、`tool/call`、`tool/result`（`sourceEventSeqs` 重映射到副本）、`TOOL_NOT_STARTED` 修复结果（保留其"无 sourceEventSeqs"的精确形状）；丢弃 `usage`（防统计翻倍）、内嵌 stream、系统消息（系统提示词由循环自己调和）与全部纯记账事件。
 - **崩溃可恢复** —— 承载事件记住 `rerunId`，fold 记住它遮蔽了哪些节点，每个副本带 `originalSeq` 标记；"哪些副本还没写"永远可以从日志单独算出来。`/state` 默认自动续传（会话活着、空闲、收件箱为空时），半写的括号孤儿会被识别并续写而不是误判为忙。
@@ -92,7 +92,18 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 - `tool/call` —— 与结果成对才复制；悬空调用连同助手内容里的工具调用块一起剥掉（格式拒绝带着未决调用的轮次收尾）；`TOOL_NOT_STARTED` 修复结果保留"无 sourceEventSeqs"的形状（校验器只接受这种修复形状）；
 - 系统消息与纯记账事件（attempt、retry、inbox、title、deliverable 卡片……）不复制。
 
-**为什么不做文件改写 / 消息投影？** 会话日志 append-only；外挂插件的自定义投影事件过不了 v4 读取校验；而 `assistant/message` 不能携带 `sourceEventSeqs`，这就是"回答必须靠回退+重放换位"的根本原因（三条都在真实校验器上验证过）。
+**为什么重跑仍然必须重放？** 先区分两种操作：
+
+- `dsh-edit-turn` 的回复编辑**不调用模型**，只是把已有回答的某个块改成用户写好的文字。宿主 0.2.1-rc.2 的 `appendPluginRecord` + `registerMessageProjection` 正好能做这件事：surface 不动，后面的轮次一个不用重放。
+- 重跑必须**让模型在新的上下文里重新生成**。模型只能从活会话的尾部开始生成；要让上下文停在目标轮，必须先把目标轮及其后的内容移出 surface（遮蔽），生成完再让后续轮次回到 surface——surface 事件不能"取消遮蔽"，只能重新追加，所以重放是结构性的，不是实现偷懒。
+
+**有没有办法绕过？** 有三种，都有代价，本插件不做：
+
+1. **官方 `sessionController.fork` 在目标位置分叉，生成完再回来**：fork 会创建一个**可见的子会话**（并复制前缀），而且用当前的默认模型，不是那一轮记录的模型；生成期间的工具副作用也发生在子会话里。子会话还会进入会话列表。
+2. **直接调 `ctx.llm.stream`**：可以绕开 surface，但绕开了 agent loop 的工具执行、审批、重试、用量记账与工具历史重建；从日志里也拿不到那一轮精确的工具声明/系统提示词增补。目标轮一旦真的调工具，这条路径就无法产出对应的 tool/result。只适合"纯文字、不用工具"的轮次，不能作为重跑语义。
+3. **用投影把新回答盖到旧 seq 上**：投影只能改写**已有消息**的 text/reasoning 块，不能向消息里**添加** tool-call 块，也不能生成它；重跑如果用了工具，投影无法表达。
+
+因此重跑保留"遮蔽 → 官方 prompt 再生成 → 逐事件重放"。重放本身已经做过压缩：内嵌 `stream`、`usage`、系统消息和纯记账事件都不复制；只复制仍在 surface 上的后续节点及其 tool 配对，所以日志增长是**尾部内容的线性副本**，不是整份会话或前缀的重复。
 
 **崩溃恢复。** 承载事件源里的 `rerunId`/`promptRequestId`/`replayFrom`/`rerunTurnEnd` + fold 的 `shadowed` 列表 + 每个副本的 `originalSeq` 标记，让"哪些副本缺失"完全可从日志推导。`/state` 报出未完成的重跑；续传只写缺失的后缀，并用"尾部前缀匹配"跳过崩溃前已经落地的括号写（避免重复 `turn/start` 让日志读不出来）。
 
@@ -107,6 +118,8 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 | 路由 | `GET/POST /dev/scratch`、`GET /dev/derived` | `devTools: true` 才挂载；端到端验证用 |
 | 前端 | `conversation.chat.assistant-actions` | 回答动作条里的 ↻ 入口（order 6，编辑铅笔之后） |
 | 前端 | `conversation.input.overlay` | 隐藏被退役的行、跟随后台重跑、显示确认/错误 |
+
+**重放会带上 dsh-edit-turn 的回复补丁（0.1.28）**：edit-turn 0.3.0 的回复编辑是 `plugin:dsh-edit-turn/patch` 投影，不改写原始回答事件。如果先 edit 了后面某条回答、再 rerun 前面一轮，本插件在复制那条被保留下来的回答时，会把该 seq 上最新的 `text` / `reasoning` patch 应用到副本内容里（reasoning 会去掉旧签名）；因此**被重跑保留的后续轮上的编辑不会因为一次更早的重跑而消失**。同一轮自身的重跑仍然以新生成的结果为准——重跑的目标回答不会被复制，编辑被覆盖是重跑的定义。记录是只读的跨插件契约：版本不是 1、字段畸形或目标块类型不符的 patch 一律跳过；即使 edit-turn 暂时不在，记录也会被本插件读取并带到副本里。
 
 **给兄弟插件的契约**：每次重跑落一条**没有可读文本的 `user/message` 替换载体**（`source.kind === 'plugin:dsh-rerun-turn'`、`rerunBy`、`rerunId`，**不占轮次**）；其 `content` 在 0.1.27 起为「空数组（证明适配器会丢）或一个零宽空格」，**不要按内容判形状**。每个重放副本的 `message.source` 带 `{ rerunBy, rerunId, originalSeq }`。按 surface 校验的入口可以沿 `/state` 的 `reruns[].shadowed` 或副本的 `originalSeq` 找到活节点。识别约定：`source.kind` 以 `plugin:` 开头、且内容里**没有可读文本**（空数组，或只有零宽/空白字符的文本块）的 user 消息是**静默载体**，不是提示词——本插件的规划器（`resolveRerunPrompt`）据此拒绝"重发一条已被删除/已被替换掉的提示词"；dsh-edit-turn 的就地改写（`kind: 'user'` + `editedBy`，且带新文本）不受影响，仍然可以重跑。历史形状（0.1.0-0.1.13 的 developer/user 载体、0.1.14-0.1.25 的 system/message 载体 + 簿记轮）继续被识别，旧日志的账本、隐藏集与 `markerTurns` 都照旧正确。
 
@@ -152,6 +165,13 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
    工具只自动修复带 `plugin:dsh-rerun-turn` 标记的坏日志；其他坏日志只报告不动。修复后重开会话，待处理的提示词会被循环自动补答。
 
 ### 更新日志
+
+**0.1.28** —— 重放带上 dsh-edit-turn 的回复补丁：先编辑后面某条回答、再重跑前面一轮时，编辑不再消失。
+
+- **读补丁**：`editPatchesOf(events)` 读取 `plugin:dsh-edit-turn/patch` 记录，按 `seq` + `blockIndex` 取每个块最新的 `text` / `reasoning` 补丁；记录版本不是 1、字段畸形、目标块类型不符的一律跳过。
+- **写入副本**：`buildReplayWrites` 在复制被保留下来的后续回答时，用 `applyEditPatches` 把补丁应用到副本内容；思维链补丁同时去掉旧 `signature` / `thinkingSignature`。工具调用、其他块、轮次结构不动；原始事件不改。
+- **边界**：同一轮自身的重跑仍以新生成结果为准（目标回答不复制，编辑被覆盖是重跑的定义）；被重跑保留的后续轮，编辑跟着副本走。记录是只读跨插件契约，edit-turn 暂时不在也能读。
+- **测试**：新增 3 条纯 builder 用例（正文补丁、思维链补丁去签名、畸形/旧版本/目标不存在时跳过且最新补丁覆盖）；`npm test` **63/63**、`npm run verify:contract` **29** 项、`npm run verify:client` **7** 项全绿。
 
 **0.1.27** —— 修复真机中断事故：**载体写死空数组，在没有手补丁的宿主上让整个 provider 请求 400，整轮中止**。
 
@@ -359,10 +379,19 @@ This plugin does it:
   the model sees.
 - **Official seams only** - the shadow is one standard
   `surfaceOp: { op: 'replace', startSeq, endSeq }` event (`/compact` uses the
-  same contract); the replay is ordinary appends. **No custom event types**:
-  out-of-repo plugin events cannot pass the v4 format validator (unknown types
-  need the `ignorable` envelope field, which `Session.append` never writes), so
-  the "custom projection event" route is closed by design.
+  same contract); the replay is ordinary appends. **This plugin still writes no
+  custom event types.** DSH 0.2.1-rc.2 does expose the official
+  `appendPluginRecord` + `registerMessageProjection` seam (dsh-edit-turn 0.3.0
+  uses it for in-place reply patches), but a rerun cannot use it: the model
+  still has to generate the answer.
+- **Why replay is structural** - the model can only generate from the live tail.
+  To generate against the target turn, that turn and everything after it must
+  leave the surface; a surface event cannot be un-shadowed, so the later turns
+  are appended back as fresh official events. Forking would create a visible
+  child session and uses the current default model; a direct `ctx.llm.stream`
+  call would bypass the agent loop's tools, approvals, retries and usage, and a
+  projection cannot add tool-call blocks to an existing message. Replay is the
+  faithful path; it already drops streams, usage, system messages and bookkeeping.
 - **Silent carrier that owns no turn** - one `user/message` with no readable
   text (`source.kind = plugin:dsh-rerun-turn`). `user/message` is the only
   surface type the format reads with no open turn and no open step. Its content
