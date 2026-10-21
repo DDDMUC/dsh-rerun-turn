@@ -410,6 +410,36 @@ test('buildReplayWrites carries edit-turn text patches into copied later turns',
   assert.equal(events[seqs.d1.seq].data.message.content[0].text, 'D1', 'the recorded event is untouched')
 })
 
+test('one multi-target edit-turn record patches several copied messages', () => {
+  const { events, seqs } = standardLog()
+  // edit-turn 0.5 saves the whole turn in ONE record whose targets can name
+  // different messages; every copied message must pick up its own target.
+  const patch = {
+    type: P.EDIT_TURN_PATCH_TYPE,
+    seq: events.length,
+    time: 1,
+    data: {
+      version: 1,
+      targets: [
+        { seq: seqs.c2.seq, blockIndex: 0, kind: 'text', text: 'C2 edited' },
+        { seq: seqs.d1.seq, blockIndex: 0, kind: 'text', text: 'D1 edited' },
+      ],
+    },
+  }
+  const log = [...events, patch]
+  const plan = P.planRerun(log, surfaceOf(log), { seq: seqs.c1.seq })
+  const writes = P.buildReplayWrites(log, plan, 7, 'rerun-1', 100, true)
+  const c2Copy = writes.find((write) =>
+    write.type === 'assistant/message' && write.data.message.source.originalSeq === seqs.c2.seq)
+  const d1Copy = writes.find((write) =>
+    write.type === 'assistant/message' && write.data.message.source.originalSeq === seqs.d1.seq)
+  assert.ok(c2Copy, 'the first patched message is replayed')
+  assert.ok(d1Copy, 'the second patched message is replayed')
+  assert.equal(c2Copy.data.message.content[0].text, 'C2 edited')
+  assert.equal(d1Copy.data.message.content[0].text, 'D1 edited')
+  assert.equal(events[seqs.c2.seq].data.message.content[0].text, 'C1 final', 'the recorded events stay untouched')
+})
+
 test('a reasoning patch carried into a copy drops the stale signature', () => {
   const { events, seqs } = standardLog()
   events[seqs.d1.seq].data.message.content.unshift({ type: 'thinking', text: 'old thought', signature: 'sig-1', thinkingSignature: 'sig-2' })

@@ -166,6 +166,11 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 ### 更新日志
 
+**0.2.0** —— 与 dsh-edit-turn 0.5 的整轮保存对齐，并把重跑按钮的尺寸修准。
+
+- **多目标补丁兼容**：edit-turn 0.5 的一次「全部」保存会把整轮多个块写成**一条** `plugin:dsh-edit-turn/patch` 记录，targets 可能跨多条消息。重放现在有测试覆盖这条形状：被保留的后续轮里，每条消息都按自己的 target 取到新文本，原记录不被改写。
+- **按钮尺寸**：`.dsrr-action` 补上 `box-sizing:border-box`（此前 `width/height:28px` 叠加 `padding:6px` 实际渲染成 40×40），并去掉 hover 的 inset 描边，只保留浅色圆底；现在与官方 action 图标一致：28×28、15px SVG、`stroke-width:1.2`、颜色 `#81858c`。
+
 **0.1.28** —— 重放带上 dsh-edit-turn 的回复补丁：先编辑后面某条回答、再重跑前面一轮时，编辑不再消失。
 
 - **读补丁**：`editPatchesOf(events)` 读取 `plugin:dsh-edit-turn/patch` 记录，按 `seq` + `blockIndex` 取每个块最新的 `text` / `reasoning` 补丁；记录版本不是 1、字段畸形、目标块类型不符的一律跳过。
