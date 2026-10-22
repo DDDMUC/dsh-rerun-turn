@@ -50,6 +50,12 @@ class FakeNode {
     )
   }
 
+  getBoundingClientRect() {
+    // The rail probe reads marker heights; the tests set them per element.
+    const height = typeof this.rectHeight === 'number' ? this.rectHeight : 10
+    return { x: 0, y: 0, width: 100, height, top: 0, left: 0, right: 100, bottom: height }
+  }
+
   get children() {
     return this.childNodes
   }
@@ -174,12 +180,23 @@ globalThis.document = {
     selector === '[data-chat-flow-key]' ? transcriptRows.slice() : globalThis.document.body.querySelectorAll(selector),
 }
 let captured = null
+const storage = new Map()
 globalThis.window = {
   __ModuleLoader__: {
     load(definition) {
       captured = definition
     },
   },
+  // The settings card persists its choice here, and the controller polls the
+  // host through a timer; both are stubbed so a test can read the stored value
+  // and never leaves a real interval behind.
+  localStorage: {
+    getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+    setItem: (key, value) => storage.set(key, String(value)),
+    removeItem: (key) => storage.delete(key),
+  },
+  setInterval: () => 0,
+  clearInterval: () => {},
 }
 
 await import(new URL('../lib/client.js', import.meta.url))
@@ -193,10 +210,14 @@ const reactStub = {
   },
   createElement: () => null,
 }
-const jsxRuntimeStub = { jsx: () => null, jsxs: () => null, Fragment: {} }
+// The settings card reads its control from the platform's own primitives, and
+// the tree is returned so a test can drive the checkbox the way the page does.
+const jsxRuntimeStub = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }), Fragment: {} }
+const primitivesStub = { Checkbox: 'Checkbox', Modal: 'Modal', Button: 'Button' }
 const stubRequireFor = (react) => (specifier) => {
   if (specifier === 'react') return react
   if (specifier === 'react/jsx-runtime') return jsxRuntimeStub
+  if (specifier === '@deepseek-ai/dsh-client-ui-primitives') return primitivesStub
   throw new Error(`unexpected require: ${specifier}`)
 }
 const client = captured.factory(stubRequireFor(reactStub))
@@ -348,6 +369,67 @@ test('a retired turn is hidden from the row data as well', () => {
 
 // --- I4 hide attribution --------------------------------------------------------
 
+test('the old answer retires the moment the rerun starts, not when the answer lands', () => {
+  const answer = row('assistant5', 1)
+  const tail = row('turn-tail', 2)
+  transcriptRows.length = 0
+  transcriptRows.push(answer, tail)
+  const nodes = {
+    assistant5: { kind: 'assistant-step', anchorSeq: 5, data: { finalNode: { seq: 5 } } },
+    'turn-tail': { kind: 'turn-tail', anchorSeq: 20, data: {} },
+  }
+  pass(view({
+    rerunning: true,
+    rerunFocus: { turn: 1, carrierSeq: 100, targetSeqs: new Set([5]), tailSeqs: new Set([20]) },
+  }), nodes)
+  assert.equal(answer.dataset.dsrrHidden, '1', 'the retired answer is hidden while the fresh row streams')
+  assert.equal(answer.style.display, 'none')
+  assert.equal(tail.dataset.dsrrHidden, undefined, 'the later turn keeps its place')
+  assert.equal(tail.style.order, '2')
+})
+
+test('the rail drops the retired turns and closes their gap', () => {
+  resetPage()
+  const nav = new FakeNode('nav')
+  const container = new FakeNode('div')
+  container.style.height = '32px'
+  const marks = []
+  for (let turn = 1; turn <= 3; turn += 1) {
+    const mark = new FakeNode('button')
+    mark.setAttribute('data-index', String(turn - 1))
+    mark.setAttribute('aria-label', `跳转到第 ${turn} 轮`)
+    mark.style.transform = `translate3d(0px, ${(turn - 1) * 10 + 1}px, 0px)`
+    container.appendChild(mark)
+    marks.push(mark)
+  }
+  nav.appendChild(container)
+  globalThis.document.body.appendChild(nav)
+
+  const rows = []
+  const nodes = {}
+  for (let turn = 1; turn <= 3; turn += 1) {
+    const node = row(`user${turn}`, turn)
+    globalThis.document.body.appendChild(node)
+    transcriptRows.push(node)
+    rows.push(node)
+    nodes[`user${turn}`] = { kind: 'user', data: { seq: turn } }
+  }
+  // Turn 2 is retired: every row it has is hidden.
+  rows[1].style.display = 'none'
+
+  pass(view({ retiredTurns: new Set([2]) }), nodes)
+  assert.equal(marks[1].style.display, 'none', 'the retired turn keeps no mark')
+  assert.equal(marks[2].style.transform, 'translate3d(0px, 11px, 0px)', 'the next mark closes the gap')
+  assert.equal(container.style.height, '32px', "the host's own height is kept: it is what its window measures")
+
+  // The turn is on screen again: its mark comes back, and so does the spacing.
+  rows[1].style.display = ''
+  pass(view({ retiredTurns: new Set() }), nodes)
+  assert.equal(marks[1].style.display, '', 'a visible turn keeps its mark')
+  assert.equal(marks[2].style.transform, 'translate3d(0px, 21px, 0px)')
+  assert.equal(container.style.height, '32px')
+})
+
 test('a sibling hide keeps the row closed even after this plugin retracts its own', () => {
   const node = row('user5', 1)
   transcriptRows.length = 0
@@ -480,6 +562,90 @@ test('a host left by a previous instance is adopted, and only extra copies are d
   assert.equal(bar.childNodes.includes(extra), false, 'the stacked copy is gone')
 })
 
+test('the confirmation is the platform modal, without the A B C1 D E F G line', () => {
+  const handle = applyInstance(freshInstance().instance)
+  const dict = handle.dictionaries.find((entry) => entry.ns === 'dsh-rerun-turn').dict.zh
+  assert.equal(
+    dict['confirm.body'].includes('A B C1 D E F G'),
+    false,
+    'the dialog no longer promises the replayed shape',
+  )
+  assert.ok(dict['confirm.body'].includes('重新生成'), 'it still says what happens to the turn')
+
+  const effects = []
+  handle.registrations.length = 0
+  const tree = handle.overlay.entry({
+    useChat: () => ({ nodes: new Map() }),
+    useRerunTurn: () => view({ confirming: true }),
+    controller: stubController(view({ confirming: true })),
+    t: (key) => dict[key] ?? key,
+  })
+  const modal = tree.props.children[0]
+  assert.equal(modal.type, 'Modal', 'the confirmation is the platform dialog, not an inline panel')
+  assert.equal(modal.props.open, true)
+  assert.equal(modal.props.title, dict['confirm.title'])
+  const [body, note] = modal.props.children.props.children
+  assert.equal(body.props.className, 'dsrr-dialog-text')
+  assert.equal(body.props.children, dict['confirm.body'])
+  assert.equal(note.props.className, 'dsrr-dialog-note', 'the dialog keeps the sibling plugin\'s two-paragraph shape')
+  assert.ok(String(note.props.children).includes('不会改写历史日志'))
+  assert.deepEqual(modal.props.footer.props.children.map((button) => button.type), ['Button', 'Button'])
+  assert.deepEqual(modal.props.footer.props.children.map((button) => button.props.variant), ['ghost', 'primary'])
+})
+
+// --- the plugin page: "ask before rerunning" (slot plugins.row.config) ---------
+
+test('the plugin page registers a row.config entry under the bundle#row key', () => {
+  const entry = byName('plugins.row.config')
+  assert.ok(entry, 'the settings page must register a plugins.row.config entry')
+  assert.equal(entry.config.key, 'dsh-rerun-turn#dsh-rerun-turn', 'the key is <bundle>#<row id>')
+})
+
+test('the row.config summary follows the checkbox', () => {
+  storage.clear()
+  const entry = byName('plugins.row.config')
+  const t = (key) => key
+  assert.equal(entry.entry({ view: 'summary', t }), 'config.summary.auto', 'the shipped default follows the host config (off)')
+  const tree = entry.entry({ view: 'page', t })
+  assert.equal(tree.props.className, 'dsrr-config')
+  assert.equal(tree.props.children[0].props.checked, false)
+  tree.props.children[0].props.onChange(true)
+  assert.equal(entry.entry({ view: 'summary', t }), 'config.summary.ask')
+  assert.equal(storage.get('dsh-rerun-turn:prefs'), '{"ask":true}', 'the choice is stored, so it survives a reload')
+  effects.length = 0
+})
+
+test('with asking off a click reruns at once, with it on it only asks', async () => {
+  storage.clear()
+  const handle = applyInstance(freshInstance().instance)
+  const controller = handle.overlay.config.inject('session-1').controller
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  }
+  const applies = () => calls.filter((url) => url.includes('/apply')).length
+
+  // Off (the host config default): the click goes straight to the host.
+  controller.rerun({ seq: 3, messageId: 'm-a1' })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(applies(), 1, 'no confirmation step while asking is off')
+  assert.equal(controller.getSnapshot().confirming, false)
+
+  // On (the settings page checkbox): the click only opens the confirmation.
+  handle.config.entry({ view: 'page', t: (key) => key }).props.children[0].props.onChange(true)
+  controller.rerun({ seq: 3, messageId: 'm-a1' })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(applies(), 1, 'nothing is rerun until the confirmation is accepted')
+  assert.equal(controller.getSnapshot().confirming, true)
+
+  // Accepting it issues the rerun.
+  controller.confirmYes()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(applies(), 2)
+  assert.equal(controller.getSnapshot().confirming, false)
+})
+
 // --- I3 re-apply: dispose cleans up, a re-apply adopts -------------------------
 
 /** A fresh factory call is a fresh module instance: its WeakMaps start empty,
@@ -494,13 +660,14 @@ function freshInstance() {
 function applyInstance(instance) {
   const disposers = []
   const registrations = []
+  const dictionaries = []
   instance.apply({
     effect(fn) {
       const disposer = fn()
       if (typeof disposer === 'function') disposers.push(disposer)
       return () => {}
     },
-    locale: { register() {} },
+    locale: { register: (ns, dict) => dictionaries.push({ ns, dict }) },
     slots: {
       inject(name, register) {
         register()
@@ -513,6 +680,9 @@ function applyInstance(instance) {
   })
   return {
     overlay: registrations.find((item) => item.config.name === 'conversation.input.overlay'),
+    config: registrations.find((item) => item.config.name === 'plugins.row.config'),
+    registrations,
+    dictionaries,
     /** Cordis disposes a fiber's effects in reverse registration order. */
     dispose() {
       for (let index = disposers.length - 1; index >= 0; index -= 1) disposers[index]()
@@ -615,6 +785,34 @@ test('a re-apply adopts the host, and a late pass of the previous instance canno
   handle3.dispose()
   await settle()
   assert.equal(hosts().length, 0)
+})
+
+test('a prompt whose reply was deleted gets no button; the next prompt reruns its own reply', async () => {
+  // UMUMUMUMUM -> U1M1 U2 U3M3 ... (M2 deleted): turn 2 has no reply left, so
+  // its prompt has nothing to rerun. The button must NOT fall through to the
+  // next turn's answer.
+  resetPage()
+  const u2 = row('user22', 2)
+  const u3 = row('user33', 3)
+  actionsBar(u2, 1)
+  actionsBar(u3, 1)
+  globalThis.document.body.appendChild(u2)
+  globalThis.document.body.appendChild(u3)
+  transcriptRows.push(u2, u3)
+  const nodes = {
+    user22: { kind: 'user', data: { seq: 22 } },
+    user33: { kind: 'user', data: { seq: 33 } },
+  }
+  const live = view({ replies: new Map([[33, { seq: 33, turn: 3, messageId: 'm-33' }]]) })
+  const controller = pass(live, nodes)
+  const hostsIn = (element) => element.querySelectorAll('[data-dsrr-action-host="1"]').length
+
+  assert.equal(hostsIn(u2), 0, 'the turn with no reply has no rerun entry')
+  assert.equal(hostsIn(u3), 1, 'the next turn keeps its own entry')
+
+  const button = u3.querySelector('[data-dsrr-action="rerun"]')
+  button.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
+  assert.deepEqual(controller.rerunCalls.map((entry) => entry.seq), [33], 'and it reruns its own answer')
 })
 
 test('a dispose clears every node this plugin injected and nothing else', async () => {

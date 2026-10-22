@@ -61,9 +61,13 @@ assert.equal(captured.id, pluginId)
 
 const reactStub = { useState: () => [null, () => {}], useEffect: () => {}, createElement: () => null }
 const jsxRuntimeStub = { jsx: () => null, jsxs: () => null, Fragment: {} }
+// The settings card draws its control from the platform's own primitives; the
+// package is a host-provided peer, so the verifier stubs it like react.
+const primitivesStub = { Checkbox: () => null }
 const exportsObject = captured.factory((specifier) => {
   if (specifier === 'react') return reactStub
   if (specifier === 'react/jsx-runtime') return jsxRuntimeStub
+  if (specifier === '@deepseek-ai/dsh-client-ui-primitives') return primitivesStub
   return require(specifier)
 })
 assert.equal(typeof exportsObject.apply, 'function', 'the factory exports apply()')

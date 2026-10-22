@@ -1,6 +1,6 @@
 {
   "name": "dsh-rerun-turn",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Infix rerun for DeepSeek Harness: re-run any earlier turn in place - the reply is regenerated from the same prompt while every later turn survives, so subsequent model calls read A B C1 D E F G. Implemented with the official surface-replace contract plus a faithful replay of the tail; the append-only session log is never rewritten.",
   "type": "module",
   "main": "lib/index.js",
@@ -62,7 +62,8 @@
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-chat",
         "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-primitives"
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
       ]
     },
     "engines": {

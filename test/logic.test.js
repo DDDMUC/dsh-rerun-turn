@@ -99,6 +99,25 @@ function standardLog() {
 
 const surfaceOf = (events) => P.foldSurface(events).nodes
 
+test('the shadow carrier follows the adapter serving this session', () => {
+  const events = [
+    { type: 'model/selection', seq: 1, data: { provider: 'deepseek-account', model: 'deepseek-flash' } },
+  ]
+  assert.equal(P.providerOf(events), 'deepseek-account')
+  assert.equal(P.providerOf([{ type: 'request/header', seq: 1, data: { header: { config: { provider: 'h' } } } }]), 'h')
+  assert.equal(P.providerOf([]), null)
+
+  const deepseekLike = { providerInfo: () => ({}), resolveImageAccess: () => '', prepareExtensions: () => ({}) }
+  const piAiLike = { providerInfo: () => ({}), resolveImageAccess: () => '' }
+  const llm = { adapters: new Map([['deepseek-account', { adapter: deepseekLike }], ['pi-ai', { adapter: piAiLike }]]) }
+  const ctx = { get: (name) => (name === 'llm' ? llm : undefined) }
+
+  assert.equal(P.adapterDropsEmptyUserContentFor(ctx, 'deepseek-account'), true)
+  assert.equal(P.adapterDropsEmptyUserContentFor(ctx, 'pi-ai'), false)
+  assert.equal(P.dropsEmptyUserContentFor(ctx, events), true, 'the DeepSeek adapter proves the drop for this session')
+  assert.equal(P.dropsEmptyUserContentFor(ctx, [{ type: 'model/selection', seq: 1, data: { provider: 'pi-ai' } }]), P.ADAPTER_DROPS_EMPTY_USER_CONTENT)
+})
+
 test('foldSurface appends and replaces', () => {
   const { events } = standardLog()
   const nodes = surfaceOf(events)

@@ -51,7 +51,7 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 2. 后台立刻开始：旧的一轮及其后内容先从模型上下文移除，提示词重新发给模型，新回答流式出现；结束后后续轮次自动重放回来。期间按钮隐藏（避免和正在生成的轮次打架）。
 3. 界面上：被退役的旧行隐藏，新生成的回答与重放的行正常出现——最终看到的顺序就是模型读到的顺序。
 
-默认一次点击即执行（配置 `confirm: true` 恢复二次确认）。
+默认一次点击即执行；设置页勾上「重跑时询问」（或配置 `confirm: true`）后先弹确认框。
 
 ### 配置
 
@@ -66,10 +66,16 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `confirm` | `false` | 客户端是否先弹一次确认（按钮下方内联确认条）。 |
+| `confirm` | `false` | 客户端是否先弹一次确认框。设置页的「重跑时询问」勾选会覆盖它（存在浏览器本地，未勾选过时跟随这里的值）。 |
 | `autoResume` | `true` | `/state` 是否在会话活着、空闲、收件箱为空时自动完成被中断的重放（不花模型调用）。 |
 | `idleTimeoutMs` | `600000` | 等待新回答闭合的最长时间；超时后重放留给续传。 |
 | `devTools` | `false` | 是否挂载验证用回环路由 `/dev/scratch`、`/dev/derived`（会发真实模型调用）。 |
+
+### 设置页
+
+插件管理页里 `dsh-rerun-turn` 那一行有配置入口，里面一个勾选：
+
+- **重跑时询问**（默认关）：勾上后每次点重跑先弹确认框（官方 Modal，与 `dsh-delete-turn` 的删除确认同一个位置/尺寸/样式），说明这一轮会怎么重放；取消勾选则点一下直接重跑。选择存在浏览器本地（`dsh-rerun-turn:prefs`），没有存过时跟随 profile 里的 `confirm`。
 
 ### 工作原理
 
@@ -117,7 +123,7 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 | 路由 | `GET /dsh-rerun-turn/debug` | 只读请求记录（诊断"点了没反应"） |
 | 路由 | `GET/POST /dev/scratch`、`GET /dev/derived` | `devTools: true` 才挂载；端到端验证用 |
 | 前端 | `conversation.chat.assistant-actions` | 回答动作条里的 ↻ 入口（order 6，编辑铅笔之后） |
-| 前端 | `conversation.input.overlay` | 隐藏被退役的行、跟随后台重跑、显示确认/错误 |
+| 前端 | `conversation.input.overlay` | 隐藏被退役的行、跟随后台重跑、显示确认框（官方 Modal）/错误 |
 
 **重放会带上 dsh-edit-turn 的回复补丁（0.1.28）**：edit-turn 0.3.0 的回复编辑是 `plugin:dsh-edit-turn/patch` 投影，不改写原始回答事件。如果先 edit 了后面某条回答、再 rerun 前面一轮，本插件在复制那条被保留下来的回答时，会把该 seq 上最新的 `text` / `reasoning` patch 应用到副本内容里（reasoning 会去掉旧签名）；因此**被重跑保留的后续轮上的编辑不会因为一次更早的重跑而消失**。同一轮自身的重跑仍然以新生成的结果为准——重跑的目标回答不会被复制，编辑被覆盖是重跑的定义。记录是只读的跨插件契约：版本不是 1、字段畸形或目标块类型不符的 patch 一律跳过；即使 edit-turn 暂时不在，记录也会被本插件读取并带到副本里。
 
@@ -165,6 +171,12 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
    工具只自动修复带 `plugin:dsh-rerun-turn` 标记的坏日志；其他坏日志只报告不动。修复后重开会话，待处理的提示词会被循环自动补答。
 
 ### 更新日志
+
+**0.2.1（工作区）** —— 重跑一开始就退掉旧回答；轮次导航不再留空档。
+
+
+- 之前：旧回答要等到新回答的 **assistant-step 行**出现才隐藏；而生成期间的「正在思考中」通常是 process/tail 行，所以旧回答会一直留在原地，新内容在它下面流式出现，生成完才替换——视觉上很别扭。
+- 现在：in-flight rerun 一旦确认，目标回答行**立即**隐藏，新的流式行直接占用它原来的位置；后续轮次仍按 `order:2` 留在下面。代价是最多一帧的空位（宿主挂上 process 行即填满）。
 
 **0.2.0** —— 与 dsh-edit-turn 0.5 的整轮保存对齐，并把重跑按钮的尺寸修准。
 
