@@ -172,17 +172,14 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 ### 更新日志
 
-**0.2.3** —— 修掉「重跑已中断」提示关不掉、一直压在输入框上方的问题。
+**0.2.3** —— 修掉「重跑已中断」提示关不掉；命名会话不再被拒。
 
 - **根因（宿主）**：`setProgress()` 把每次阶段更新合并进上一条记录，从不清理旧字段。一次 `interrupted` 写下的 `error` 会跟着 `replaying`、`done` 一路活下来，`/state` 于是一直报告"已中断"，前端也就一直画那条提示。
 - **修法（宿主）**：新增纯函数 `progressAfter(current, patch)`；**阶段变化 = 新记录**，不再继承上一阶段的 `error` / `promptError`；同一阶段内的增量 patch 仍然合并。`setProgress()` 改走它。
 - **修法（客户端）**：提示只认 `phase === 'interrupted' | 'failed'` 的 `error`（旧宿主合并出来的 `done + error` 不再显示）；提示条右侧加关闭按钮，点整条也能关；关闭状态按「阶段 + rerunId + 文案」记忆，新错误仍会重新出现。
-- **测试**：`npm test` **80/80**（新增 3 条 `progressAfter` 用例、5 条 DOM 用例：stale error 不显示、关闭按钮、点整条关闭、dismissed key、promptError 仍显示）。
-
-**（工作区）** —— 会话 id 校验放宽 + 空会话按空状态处理。
-
-- **会话 id 不再只认 UUID**：命名会话（例如 `bili-whale`，`~/.dsh/storages/<profile>/sessions/bili-whale.json`）是完全合法的会话，但这里的校验只接受 UUID 形式，于是对它的每个请求都被 400 拒掉 —— 面板上就是「状态加载失败，稍后重试。」。现在按 DSH 自己的语法（宿主侧 schema 就是 `z.string().min(1)`）放宽为 `/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/`，仍然挡住 `/`、`\`、`..`、空白与控制字符。
+- **命名会话不再被拒（本版一并带上）**：会话 id 校验原来只认 UUID，而 `bili-whale` 这类命名会话（`~/.dsh/storages/<profile>/sessions/bili-whale.json`）是完全合法的会话 —— 于是对它的每个请求都被 400 拒掉，面板上就是「状态加载失败，稍后重试。」。现在按 DSH 自己的语法（宿主侧 schema 就是 `z.string().min(1)`）放宽为 `/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/`，仍然挡住 `/`、`\`、`..`、空白与控制字符。
 - **查不到会话按空状态处理**：没有日志的会话（刚建的命名会话）返回空状态而不是 404 —— 面板正常加载、显示"没有可操作的内容"，日志一出现下一次刷新就接上。
+- **测试**：`npm test` **81/81**（新增 3 条 `progressAfter` 用例、5 条 DOM 用例：stale error 不显示、关闭按钮、点整条关闭、dismissed key、promptError 仍显示；以及命名会话 / 空状态的契约用例）。
 
 **0.2.2** —— 设置页多一个「重跑时询问」，确认框换成官方 Modal。
 
