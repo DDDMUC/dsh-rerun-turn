@@ -164,15 +164,35 @@ test('a well-formed sessionId is the only thing /state requires', async () => {
   // not on the query: an 'invalid' here would mean a second required parameter
   // crept in and the sibling's call would stop working.
   assert.notEqual(answer.body.code, 'invalid', 'no other query parameter became required')
-  assert.equal(answer.status, 404)
-  assert.equal(answer.body.code, 'session-not-found')
+  // ... and a legal id whose log does not exist yet is an EMPTY session, not an
+  // error: a named session the user just created has no log until they send
+  // something. A 404 here is what the panel used to print as "状态加载失败".
+  assert.equal(answer.status, 200)
+  assert.equal(answer.body.ok, true)
+  assert.deepEqual(answer.body.replies, [], 'nothing to rerun')
+  assert.deepEqual(answer.body.reruns, [])
+  assert.equal(answer.body.busy, false)
+  assert.equal(answer.body.rerunning, false)
+  assert.equal(answer.body.loaded === undefined ? true : true, true)
+})
+
+test('a NAMED session is a session: bili-whale is accepted, not refused', async () => {
+  const route = routes().get('/dsh-rerun-turn/state')
+  const answer = await call(route, 'GET', stateUrl('bili-whale'))
+  // DSH ids are opaque (`z.string().min(1)` on the host side) and the GUI
+  // creates named ones. The UUID-only test this replaces answered 400 for them.
+  assert.equal(answer.status, 200, 'a named session id is well formed')
+  assert.equal(answer.body.ok, true)
+  assert.notEqual(answer.body.code, 'invalid')
 })
 
 test('a malformed sessionId is still refused', async () => {
   const route = routes().get('/dsh-rerun-turn/state')
-  const answer = await call(route, 'GET', stateUrl('not-a-session'))
-  assert.equal(answer.status, 400)
-  assert.equal(answer.body.code, 'invalid')
+  for (const bad of ['../etc/passwd', 'a/b', 'a\\b', '.hidden', 'x'.repeat(200), 'has space', '']) {
+    const answer = await call(route, 'GET', stateUrl(bad))
+    assert.equal(answer.status, 400, JSON.stringify(bad) + ' must be refused')
+    assert.equal(answer.body.code, 'invalid')
+  }
 })
 
 // --- 3 and 4. the apply shape --------------------------------------------------
@@ -224,6 +244,7 @@ const CONTRACT_CODES = new Set([
   'rerunning',
   'stale',
   'session-not-found',
+  'session-empty',
   'session-not-active',
   'not-rerunnable',
   'already-retired',
@@ -248,12 +269,16 @@ test('every code this file observes belongs to the published vocabulary', async 
     await call(route, 'GET', stateUrl(undefined)),
     await call(route, 'GET', stateUrl(SESSION_ID)),
     await call(route, 'POST', stateUrl(undefined), {}),
-    await call(route, 'GET', stateUrl('not-a-session')),
+    await call(route, 'GET', stateUrl('bili-whale')),
+    await call(route, 'GET', stateUrl('../etc/passwd')),
     await call(routes().get('/dsh-rerun-turn/apply'), 'POST', '/dsh-rerun-turn/apply', { sessionId: SESSION_ID, seq: 1 }),
   ]) {
     observed.push(answer.body.code)
   }
   for (const code of observed) {
+    // A successful answer carries no error code at all - the empty-session
+    // answers are exactly that, and they must stay successful.
+    if (code === undefined) continue
     assert.ok(CONTRACT_CODES.has(code), code + ' is not in the contract vocabulary')
   }
 })
