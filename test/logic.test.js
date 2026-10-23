@@ -990,3 +990,45 @@ test('a rerun over a twice-rewritten prompt reads the latest wording and retires
     assert.equal(hiddenSeqs.filter((value) => value === seq).length, 1, `seq ${seq} is still retired exactly once after the replay`)
   }
 })
+
+// --- live progress records ------------------------------------------------------
+//
+// `/state` reports one progress record per session. A stale `error` from an
+// earlier phase is not cosmetic: the client turns any `progress.error` into an
+// interruption notice, so a merged record keeps that notice on screen forever
+// and its dismiss handler has nothing of its own to clear.
+
+test('a phase change replaces the previous progress record', () => {
+  const interrupted = P.progressAfter({}, {
+    phase: 'interrupted',
+    rerunId: 'rerun-1',
+    error: 'the regenerated turn did not settle in time; replay deferred',
+  })
+  assert.deepEqual(interrupted, {
+    phase: 'interrupted',
+    rerunId: 'rerun-1',
+    error: 'the regenerated turn did not settle in time; replay deferred',
+  })
+
+  const done = P.progressAfter(interrupted, { phase: 'done', rerunId: 'rerun-1', replayed: 3 })
+  assert.deepEqual(done, { phase: 'done', rerunId: 'rerun-1', replayed: 3 })
+  assert.equal('error' in done, false, 'the interruption error does not outlive its phase')
+})
+
+test('a phase change also drops a previous promptError', () => {
+  const waiting = P.progressAfter({}, { phase: 'waiting', rerunId: 'rerun-2', promptError: 'the prompt was not accepted' })
+  assert.equal(waiting.promptError, 'the prompt was not accepted')
+  const done = P.progressAfter(waiting, { phase: 'done', rerunId: 'rerun-2', replayed: 1 })
+  assert.equal('promptError' in done, false)
+})
+
+test('the new phase keeps its own error and the same phase keeps merging', () => {
+  const failed = P.progressAfter(
+    { phase: 'interrupted', rerunId: 'rerun-3', error: 'deferred' },
+    { phase: 'failed', rerunId: 'rerun-3', error: 'the append failed' },
+  )
+  assert.deepEqual(failed, { phase: 'failed', rerunId: 'rerun-3', error: 'the append failed' })
+
+  const patched = P.progressAfter({ phase: 'replaying', rerunId: 'rerun-4' }, { replayed: 2 })
+  assert.deepEqual(patched, { phase: 'replaying', rerunId: 'rerun-4', replayed: 2 })
+})

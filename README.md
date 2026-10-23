@@ -172,6 +172,13 @@ dsh plugin --profile web add /path/to/dsh-rerun-turn
 
 ### 更新日志
 
+**0.2.3** —— 修掉「重跑已中断」提示关不掉、一直压在输入框上方的问题。
+
+- **根因（宿主）**：`setProgress()` 把每次阶段更新合并进上一条记录，从不清理旧字段。一次 `interrupted` 写下的 `error` 会跟着 `replaying`、`done` 一路活下来，`/state` 于是一直报告"已中断"，前端也就一直画那条提示。
+- **修法（宿主）**：新增纯函数 `progressAfter(current, patch)`；**阶段变化 = 新记录**，不再继承上一阶段的 `error` / `promptError`；同一阶段内的增量 patch 仍然合并。`setProgress()` 改走它。
+- **修法（客户端）**：提示只认 `phase === 'interrupted' | 'failed'` 的 `error`（旧宿主合并出来的 `done + error` 不再显示）；提示条右侧加关闭按钮，点整条也能关；关闭状态按「阶段 + rerunId + 文案」记忆，新错误仍会重新出现。
+- **测试**：`npm test` **80/80**（新增 3 条 `progressAfter` 用例、5 条 DOM 用例：stale error 不显示、关闭按钮、点整条关闭、dismissed key、promptError 仍显示）。
+
 **0.2.2** —— 设置页多一个「重跑时询问」，确认框换成官方 Modal。
 
 - **设置页勾选**：插件管理页里 `dsh-rerun-turn` 这一行的配置入口新增「重跑时询问」（默认关）。勾上后每次点重跑先弹确认框，说明这一轮会怎么重放；取消勾选则点一下直接重跑。选择存在浏览器本地（`dsh-rerun-turn:prefs`），没有存过时跟随 profile 里的 `confirm`。
