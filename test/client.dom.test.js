@@ -280,6 +280,7 @@ function view(patch) {
     failure: null,
     notice: null,
     noticeError: false,
+    dismissedKey: null,
     confirming: false,
     loaded: true,
     loadError: false,
@@ -297,6 +298,7 @@ function stubController(currentView) {
   return {
     rowCount: -1,
     rerunCalls: [],
+    dismissCalls: [],
     load() {},
     stopPolling() {},
     ensurePolling() {},
@@ -304,22 +306,35 @@ function stubController(currentView) {
     rerun(entry) {
       this.rerunCalls.push(entry)
     },
+    dismissNotice() {
+      this.dismissCalls.push(true)
+    },
     getSnapshot: () => currentView,
   }
 }
 
-/** Run one real applyDom pass through the registered overlay entry. */
-function pass(currentView, nodes) {
+/** Render the overlay entry once and return both its tree and its controller. */
+function render(currentView, nodes = {}) {
   effects.length = 0
   const controller = stubController(currentView)
-  overlaySlot.entry({
+  const tree = overlaySlot.entry({
     useChat: () => ({ nodes: new Map(Object.entries(nodes)) }),
     useRerunTurn: () => currentView,
     controller,
     t: (key) => key,
   })
   for (const effect of effects) effect()
-  return controller
+  return { controller, tree }
+}
+
+/** Run one real applyDom pass through the registered overlay entry. */
+function pass(currentView, nodes) {
+  return render(currentView, nodes).controller
+}
+
+/** The notice nodes in a rendered stack, in order. */
+function noticesOf(tree) {
+  return tree.props.children.filter((child) => child !== null && child !== undefined && String(child.props && child.props.className).includes('dsrr-notice'))
 }
 
 // --- slot table -----------------------------------------------------------------
@@ -855,3 +870,51 @@ test('a dispose clears every node this plugin injected and nothing else', async 
   assert.equal(bar.childNodes.includes(sibling), false, 'nothing was moved into the action bar')
 })
 
+// --- the progress notice --------------------------------------------------------
+//
+// A rerun's live progress is polled into the overlay. The interruption text is
+// derived from `progress.error`, so two rules matter: it only applies to a
+// phase that is actually interrupted/failed (older hosts merged records and
+// left the error behind on `done`), and the user can close it.
+
+const deferredProgress = {
+  phase: 'interrupted',
+  rerunId: 'rerun-1',
+  error: 'the regenerated turn did not settle in time; replay deferred',
+}
+
+test('a stale progress error on a finished phase is not a notice', () => {
+  const { tree } = render(view({ progress: { phase: 'done', rerunId: 'rerun-1', replayed: 2, error: deferredProgress.error } }))
+  assert.equal(noticesOf(tree).length, 0, 'done with an inherited error shows nothing')
+})
+
+test('an interrupted rerun notice carries a working close button', () => {
+  const { tree, controller } = render(view({ progress: deferredProgress }))
+  const notices = noticesOf(tree)
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0].props.children[1].type, 'button', 'a close button is part of the notice')
+  notices[0].props.children[1].props.onClick({ stopPropagation() {} })
+  assert.equal(controller.dismissCalls.length, 1, 'the close button asks the controller to dismiss')
+})
+
+test('clicking the notice body dismisses it too', () => {
+  const { tree, controller } = render(view({ progress: deferredProgress }))
+  noticesOf(tree)[0].props.onClick()
+  assert.equal(controller.dismissCalls.length, 1)
+})
+
+test('a dismissed progress notice stays closed, but a new error shows again', () => {
+  const key = 'interrupted|rerun-1|the regenerated turn did not settle in time; replay deferred|'
+  assert.equal(noticesOf(render(view({ progress: deferredProgress, dismissedKey: key })).tree).length, 0)
+
+  const moved = { ...deferredProgress, error: 'replay deferred: the tail never quieted' }
+  assert.equal(noticesOf(render(view({ progress: moved, dismissedKey: key })).tree).length, 1, 'a different error has a different key')
+})
+
+test('a prompt error is still shown', () => {
+  const progress = { phase: 'replaying', rerunId: 'rerun-2', promptError: 'the prompt was not accepted' }
+  const { tree } = render(view({ progress }))
+  const notices = noticesOf(tree)
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0].props.children[0].props.children, 'the prompt was not accepted')
+})
