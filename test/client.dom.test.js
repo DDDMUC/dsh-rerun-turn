@@ -698,8 +698,10 @@ test('the settings card defines the two words the host does not', () => {
   // The options are named with the same words the terms line defines.
   const select = selectOf(page)
   assert.deepEqual(select.props.children.map((option) => option.props.children), ['config.resend.below', 'config.resend.inplace'])
-  assert.match(dict.zh['config.resend.below'], /可见轮/, 'the option name uses the defined word')
-  assert.match(dict.zh['config.resend.inplace'], /可见轮/, 'both of them')
+  // The option IS the word, two characters each: the explanation belongs to the
+  // hint below it, not to the choice.
+  assert.equal(dict.zh['config.resend.below'], '顺补')
+  assert.equal(dict.zh['config.resend.inplace'], '自补')
 })
 
 test('with asking off a click reruns at once, with it on it only asks', async () => {
