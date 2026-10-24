@@ -166,6 +166,35 @@ test('planRerun accepts messageId addressing and rejects non-replies', () => {
   assert.throws(() => P.planRerun(events, nodes, { seq: 9999 }), /target event does not exist/)
 })
 
+test('a turn that never produced a reply is addressed by its prompt, and the plan re-sends it', () => {
+  // The shape the client's prompt-side button sends: the user stopped the turn
+  // (or it failed), so no assistant message was finalized. The prompt is the
+  // only address left, and planRerun accepts it for exactly this turn - the
+  // "红框是最末轮，它下面没回答，点重跑就直接用它发请求" case.
+  const b = buildEvents()
+  b.turnStart(1)
+  b.stepStart(1, 1)
+  b.user('A')
+  b.assistant(1, 1, 'A1')
+  b.stepEnd(1, 1)
+  b.turnEnd(1)
+  b.turnStart(2)
+  b.stepStart(2, 1)
+  const c = b.user('C')
+  b.stepEnd(2, 1)
+  b.turnEnd(2)
+  const events = b.events
+  const plan = P.planRerun(events, surfaceOf(events), { seq: c.seq })
+  assert.equal(plan.promptSeq, c.seq, 'the prompt itself is the target')
+  assert.equal(plan.targetSeq, c.seq)
+  assert.deepEqual(plan.prompt, { text: 'C', images: [], files: [], attachments: 0 })
+  // The prompt is shadowed because the rerun re-sends it: the original must not
+  // stay in the model context beside the fresh copy. Nothing follows it, so the
+  // replay window is empty.
+  assert.deepEqual(plan.shadowed, [c.seq], 'the prompt itself is shadowed, not replayed')
+  assert.equal(plan.replayFrom, null, 'nothing follows the prompt, so there is nothing to replay')
+})
+
 test('planRerun refuses file-attachment prompts', () => {
   const { events, seqs } = standardLog()
   const withFile = {
@@ -599,6 +628,43 @@ test('replayOrphanOpen recognizes only bracket-and-marker tails', () => {
     { type: 'user/message', seq: working.length, time: 1, data: { id: uid('m'), role: 'user', content: [textBlock('hi')], source: { kind: 'user' } }, surfaceOp: 'append' },
   ]
   assert.equal(P.replayOrphanOpen(working, 'r'), false)
+})
+
+test('a turn whose model output carries nothing readable is not advertised', () => {
+  // "Advertised = has an O". The plugin's own silent carrier (an assistant
+  // message with an empty or zero-width-only body) is not model output, so no
+  // rerun button may address that turn - otherwise "the first visible turn with
+  // an O below" would land on a turn that has no O at all.
+  const { events, seqs } = standardLog()
+  const target = seqs.c1.seq
+  const before = P.rerunnableReplies(events, surfaceOf(events)).map((reply) => reply.seq)
+  assert.ok(before.includes(target), 'the fixture advertises the reply to begin with')
+
+  const stripped = events.map((event) => event.seq === target
+    ? { ...event, data: { ...event.data, message: { ...event.data.message, content: [] } } }
+    : event)
+  assert.equal(
+    P.rerunnableReplies(stripped, surfaceOf(stripped)).some((reply) => reply.seq === target),
+    false,
+    'an empty body is not an O',
+  )
+
+  const invisible = events.map((event) => event.seq === target
+    ? { ...event, data: { ...event.data, message: { ...event.data.message, content: [{ type: 'text', text: '\u200b' }] } } }
+    : event)
+  assert.equal(
+    P.rerunnableReplies(invisible, surfaceOf(invisible)).some((reply) => reply.seq === target),
+    false,
+    'zero-width-only text is not an O either',
+  )
+
+  const toolOnly = events.map((event) => event.seq === target
+    ? { ...event, data: { ...event.data, message: { ...event.data.message, content: [{ type: 'tool-call', id: 'c1', name: 'web_search', arguments: '{}' }] } } }
+    : event)
+  assert.ok(
+    P.rerunnableReplies(toolOnly, surfaceOf(toolOnly)).some((reply) => reply.seq === target),
+    'a tool call IS an O: a turn that only called tools still has model output',
+  )
 })
 
 test('rerunnableReplies lists live replies with ids and turns', () => {

@@ -547,9 +547,19 @@ test('the user-row button is injected once, namespaced, and never disturbs forei
   assert.equal(bar.childNodes.includes(late), true, 'a node added after the pass is untouched')
   assert.equal(hosts().length, 1)
 
-  // The target reply disappears: the host goes, the foreign nodes stay.
-  pass(view(), nodes)
-  assert.equal(hosts().length, 0, 'no ghost node is left behind')
+  // The target reply disappears and a later turn exists: the host goes, the
+  // foreign nodes stay. (On the LAST user row an unanswered prompt keeps its
+  // button on purpose - that is the "send this prompt again" affordance.)
+  const later = row('user6', 3)
+  actionsBar(later, 1)
+  globalThis.document.body.appendChild(later)
+  transcriptRows.push(later)
+  pass(view(), { ...nodes, user6: { kind: 'user', data: { seq: 6 } } })
+  // An unanswered row keeps its button on purpose (it addresses the newest
+  // unanswered prompt, or that very turn - the `resend` setting). What this
+  // test guards is that no SECOND host appears and no foreign node is touched.
+  assert.equal(hosts().length, 1, 'no ghost node: still exactly one host')
+  assert.equal(hosts()[0], host, 'and it is the node that was already there')
   assert.equal(bar.childNodes.includes(sibling), true)
 })
 
@@ -616,6 +626,34 @@ test('the plugin page registers a row.config entry under the bundle#row key', ()
   assert.equal(entry.config.key, 'dsh-rerun-turn#dsh-rerun-turn', 'the key is <bundle>#<row id>')
 })
 
+/** Every element in a React tree, depth first. */
+function cardNodes(tree) {
+  const out = []
+  const visit = (node) => {
+    if (node === null || node === undefined) return
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child)
+      return
+    }
+    if (typeof node !== 'object' || node.props === undefined || node.props === null) return
+    out.push(node)
+    visit(node.props.children)
+  }
+  visit(tree)
+  return out
+}
+
+/** The card's checkbox / select / a classed node, wherever they sit. */
+function checkboxOf(tree) {
+  return cardNodes(tree).find((node) => typeof node.props.checked === 'boolean')
+}
+function selectOf(tree) {
+  return cardNodes(tree).find((node) => node.props.className === 'dsrr-select')
+}
+function classedIn(tree, className) {
+  return cardNodes(tree).find((node) => node.props.className === className)
+}
+
 test('the row.config summary follows the checkbox', () => {
   storage.clear()
   const entry = byName('plugins.row.config')
@@ -623,11 +661,45 @@ test('the row.config summary follows the checkbox', () => {
   assert.equal(entry.entry({ view: 'summary', t }), 'config.summary.auto', 'the shipped default follows the host config (off)')
   const tree = entry.entry({ view: 'page', t })
   assert.equal(tree.props.className, 'dsrr-config')
-  assert.equal(tree.props.children[0].props.checked, false)
-  tree.props.children[0].props.onChange(true)
+  assert.equal(checkboxOf(tree).props.checked, false)
+  checkboxOf(tree).props.onChange(true)
   assert.equal(entry.entry({ view: 'summary', t }), 'config.summary.ask')
   assert.equal(storage.get('dsh-rerun-turn:prefs'), '{"ask":true}', 'the choice is stored, so it survives a reload')
   effects.length = 0
+})
+
+test('the settings card defines the two words the host does not', () => {
+  // The choice is stated in this plugin's own words - a LOG TURN (every turn is
+  // one: the log cannot be deleted) and a VISIBLE TURN (what the transcript
+  // should show after the plugins' work). Without the definition the card is
+  // unreadable three months later, so the card carries it.
+  const handle = applyInstance(freshInstance().instance)
+  const entry = byName('plugins.row.config')
+  const page = entry.entry({ view: 'page', t: (key) => key })
+  const terms = classedIn(page, 'dsrr-terms')
+  assert.ok(terms, 'the card carries the convention block')
+  assert.equal(page.props.children[0], terms, 'and it leads the card: both settings are worded in its terms')
+  assert.ok(classedIn(page, 'dsrr-config-divider'), 'the two settings are separated by a hairline')
+  const texts = cardNodes(terms).map((node) => node.props.children).filter((child) => typeof child === 'string')
+  assert.ok(texts.includes('config.terms.title'), 'a title')
+  assert.ok(texts.includes('config.terms.short'), 'the shorthand')
+  assert.ok(texts.includes('config.terms.log') && texts.includes('config.terms.log.def'), 'the log turn and its meaning')
+  assert.ok(texts.includes('config.terms.visible') && texts.includes('config.terms.visible.def'), 'the visible turn and its meaning')
+  const dict = handle.dictionaries.find((item) => item.ns === 'dsh-rerun-turn').dict
+  assert.match(dict.zh['config.terms.short'], /Q = 用户输入；O = 模型输出的所有内容块（O = C \+ A \+ T）/, 'zh defines the shorthand')
+  assert.match(dict.zh['config.terms.short'], /C = 思维链，A = 正文，T = 工具调用/, 'including C, A and T')
+  assert.equal(dict.zh['config.terms.log'], '日志轮')
+  assert.equal(dict.zh['config.terms.log.def'], '日志里记录的轮次', 'zh defines a log turn')
+  assert.equal(dict.zh['config.terms.visible'], '可见轮')
+  assert.equal(dict.zh['config.terms.visible.def'], '对话视窗里、经插件操作之后应该看到的那些轮次', 'and a visible turn')
+  assert.match(dict.en['config.terms.short'], /O = every content block the model outputs \(O = C \+ A \+ T\)/, 'en defines the shorthand')
+  assert.equal(dict.en['config.terms.log.def'], 'a turn recorded in the log', 'en defines a log turn')
+  assert.match(dict.en['config.terms.visible.def'], /the transcript should show/, 'and a visible turn')
+  // The options are named with the same words the terms line defines.
+  const select = selectOf(page)
+  assert.deepEqual(select.props.children.map((option) => option.props.children), ['config.resend.below', 'config.resend.inplace'])
+  assert.match(dict.zh['config.resend.below'], /可见轮/, 'the option name uses the defined word')
+  assert.match(dict.zh['config.resend.inplace'], /可见轮/, 'both of them')
 })
 
 test('with asking off a click reruns at once, with it on it only asks', async () => {
@@ -648,7 +720,7 @@ test('with asking off a click reruns at once, with it on it only asks', async ()
   assert.equal(controller.getSnapshot().confirming, false)
 
   // On (the settings page checkbox): the click only opens the confirmation.
-  handle.config.entry({ view: 'page', t: (key) => key }).props.children[0].props.onChange(true)
+  checkboxOf(handle.config.entry({ view: 'page', t: (key) => key })).props.onChange(true)
   controller.rerun({ seq: 3, messageId: 'm-a1' })
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.equal(applies(), 1, 'nothing is rerun until the confirmation is accepted')
@@ -802,10 +874,11 @@ test('a re-apply adopts the host, and a late pass of the previous instance canno
   assert.equal(hosts().length, 0)
 })
 
-test('a prompt whose reply was deleted gets no button; the next prompt reruns its own reply', async () => {
-  // UMUMUMUMUM -> U1M1 U2 U3M3 ... (M2 deleted): turn 2 has no reply left, so
-  // its prompt has nothing to rerun. The button must NOT fall through to the
-  // next turn's answer.
+test('a prompt whose reply was deleted keeps a button that addresses the newest unanswered turn', async () => {
+  // U1M1 U2 U3M3 ... (M2 deleted): turn 2 has no reply left, so its prompt is
+  // an unanswered turn and carries a button - but that button must NOT fall
+  // through to the next turn's ANSWER: it addresses the newest unanswered
+  // prompt (here turn 2 itself, the only one).
   resetPage()
   const u2 = row('user22', 2)
   const u3 = row('user33', 3)
@@ -822,12 +895,101 @@ test('a prompt whose reply was deleted gets no button; the next prompt reruns it
   const controller = pass(live, nodes)
   const hostsIn = (element) => element.querySelectorAll('[data-dsrr-action-host="1"]').length
 
-  assert.equal(hostsIn(u2), 0, 'the turn with no reply has no rerun entry')
-  assert.equal(hostsIn(u3), 1, 'the next turn keeps its own entry')
+  assert.equal(hostsIn(u2), 1, 'the unanswered turn carries a button')
+  assert.equal(hostsIn(u3), 1, 'the answered turn keeps its own entry')
 
   const button = u3.querySelector('[data-dsrr-action="rerun"]')
   button.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
-  assert.deepEqual(controller.rerunCalls.map((entry) => entry.seq), [33], 'and it reruns its own answer')
+  assert.deepEqual(controller.rerunCalls.map((entry) => entry.seq), [33], 'the answered turn reruns its own reply')
+
+  const unanswered = u2.querySelector('[data-dsrr-action="rerun"]')
+  unanswered.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
+  assert.deepEqual(
+    controller.rerunCalls.map((entry) => entry.seq),
+    [33, 22],
+    'the unanswered turn addresses the newest unanswered prompt (turn 2), never turn 3\'s reply',
+  )
+})
+
+test('the last turn with no reply yet keeps its rerun button and re-sends the prompt', async () => {
+  // The shape the request names: the newest prompt has no answer under it, so
+  // pressing rerun should send that prompt again. The host accepts a prompt
+  // target for exactly this turn (planRerun), so the button addresses the
+  // prompt rather than a reply that does not exist.
+  resetPage()
+  const node = row('user41', 7)
+  const { bar } = actionsBar(node, 2)
+  globalThis.document.body.appendChild(node)
+  transcriptRows.push(node)
+  const nodes = { user41: { kind: 'user', data: { seq: 41 } } }
+  const live = view({ replies: new Map() })
+  const controller = pass(live, nodes)
+
+  const hosts = bar.querySelectorAll('[data-dsrr-action-host="1"]')
+  assert.equal(hosts.length, 1, 'an unanswered last prompt keeps its button')
+  const button = hosts[0].querySelector('[data-dsrr-action="rerun"]')
+  assert.ok(button, 'and it is the namespaced rerun button')
+  assert.equal(button.getAttribute('aria-label'), 'action.resend.below', 'its label says which turn it will rerun')
+  button.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
+  assert.deepEqual(controller.rerunCalls.map((entry) => entry.seq), [41], 'the click addresses the prompt, the shape the host accepts')
+})
+
+test('the resend setting decides what an unanswered turn addresses: the first A below, or its own turn', async () => {
+  // Q2 has no reply, and Q3's reply (seq 33) sits below it. `below` (default)
+  // reruns THAT reply; `inplace` regenerates Q2's own turn instead.
+  const build = () => {
+    resetPage()
+    const unanswered = row('user42', 2)
+    const answered = row('assistant-step3:1', 3)
+    actionsBar(unanswered, 1)
+    globalThis.document.body.appendChild(unanswered)
+    globalThis.document.body.appendChild(answered)
+    transcriptRows.push(unanswered, answered)
+    return unanswered
+  }
+  const nodes = {
+    user42: { kind: 'user', data: { seq: 42 } },
+    'assistant-step3:1': { kind: 'assistant-step', anchorSeq: 33, data: { finalNode: { seq: 33 } } },
+  }
+  const replies = new Map([[33, { seq: 33, turn: 3, messageId: 'm-33' }]])
+
+  const unanswered = build()
+  const byDefault = pass(view({ replies }), nodes)
+  const belowButton = unanswered.querySelector('[data-dsrr-action="rerun"]')
+  assert.equal(belowButton.getAttribute('aria-label'), 'action.resend.below')
+  belowButton.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
+  assert.deepEqual(
+    byDefault.rerunCalls.map((entry) => entry.seq),
+    [33],
+    'the default reruns the reply of the first visible turn below that has an A',
+  )
+
+  // inplace: the Q addresses the visible turn it belongs to. Switched through
+  // the settings card, exactly as the page does it.
+  const configEntry = byName('plugins.row.config')
+  const page = configEntry.entry({ view: 'page', t: (key) => key })
+  const select = selectOf(page)
+  assert.deepEqual(select.props.children.map((option) => option.props.value), ['below', 'inplace'])
+  select.props.onChange({ target: { value: 'inplace' } })
+  assert.equal(JSON.parse(storage.get('dsh-rerun-turn:prefs')).resend, 'inplace', 'the choice is stored')
+
+  const own = build()
+  const inplace = pass(view({ replies }), nodes)
+  const ownButton = own.querySelector('[data-dsrr-action="rerun"]')
+  assert.equal(ownButton.getAttribute('aria-label'), 'action.resend.inplace')
+  ownButton.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
+  assert.deepEqual(inplace.rerunCalls.map((entry) => entry.seq), [42], 'inplace addresses the turn the Q belongs to')
+
+  // A HIDDEN reply is not visible: `below` must skip it and fall through to the
+  // newest unanswered prompt instead of addressing something off screen.
+  select.props.onChange({ target: { value: 'below' } })
+  const skipped = build()
+  const hidden = pass(view({ replies, hidden: new Map([[33, 'message']]) }), nodes)
+  skipped.querySelector('[data-dsrr-action="rerun"]').listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
+  assert.deepEqual(hidden.rerunCalls.map((entry) => entry.seq), [42], 'a hidden reply is skipped, the fallback sends the newest unanswered prompt')
+
+  // Back to the shipped default so the rest of the file sees it.
+  select.props.onChange({ target: { value: 'below' } })
 })
 
 test('a dispose clears every node this plugin injected and nothing else', async () => {
