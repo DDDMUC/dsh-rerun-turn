@@ -1080,3 +1080,12 @@ test('a prompt error is still shown', () => {
   assert.equal(notices.length, 1)
   assert.equal(notices[0].props.children[0].props.children, 'the prompt was not accepted')
 })
+
+// The settings card is exported so a composing bundle (dsh-as-aistudio) can
+// render THE SAME component on its own page instead of re-implementing it.
+test('exports the settings card for a composing bundle', () => {
+  assert.equal(typeof client.ConfigCard, 'function')
+  assert.equal(client.ConfigCard.name, 'AskBeforeRerunOption')
+  const summary = client.ConfigCard({ view: 'summary', t: (key) => key })
+  assert.equal(typeof summary, 'string', 'summary renders an inline one-liner')
+})
