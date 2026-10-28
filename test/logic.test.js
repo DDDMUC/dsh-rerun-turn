@@ -1098,3 +1098,12 @@ test('the new phase keeps its own error and the same phase keeps merging', () =>
   const patched = P.progressAfter({ phase: 'replaying', rerunId: 'rerun-4' }, { replayed: 2 })
   assert.deepEqual(patched, { phase: 'replaying', rerunId: 'rerun-4', replayed: 2 })
 })
+
+test('normalizeShadowed 拍平嵌套、去重、排序', () => {
+  // 宿主契约要的是"非负整数、非空、不重复"的扁平列表；一条嵌套列表会让整条事件
+  // 被 adoptSessionEvent / foldSurface 直接拒绝（实测线上日志里就有三条这样的事件）。
+  assert.deepEqual(P.normalizeShadowed([[11119, 11121], 11125, 11125, 11128]), [11119, 11121, 11125, 11128])
+  assert.deepEqual(P.normalizeShadowed([3, 1, 2]), [1, 2, 3])
+  assert.deepEqual(P.normalizeShadowed([1, 'x', null, 2, -1]), [1, 2])
+  assert.deepEqual(P.normalizeShadowed([]), [])
+})
