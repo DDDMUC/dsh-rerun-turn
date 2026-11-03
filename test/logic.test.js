@@ -1107,3 +1107,75 @@ test('normalizeShadowed 拍平嵌套、去重、排序', () => {
   assert.deepEqual(P.normalizeShadowed([1, 'x', null, 2, -1]), [1, 2])
   assert.deepEqual(P.normalizeShadowed([]), [])
 })
+
+// A session where both prompts were rewritten in place (edit carriers appended
+// AFTER the turn closed, standing in the prompt's slot). Rerunning turn 1 must
+// keep the later turn's edited prompt IN FRONT OF its reply and retire the
+// originals too - the three shapes session-ed52995a exposed.
+function editedPromptsLog() {
+  const b = buildEvents()
+  b.turnStart(1)
+  b.stepStart(1, 1)
+  b.push(b.next('system/message', { turn: 1, step: 1, message: { id: uid('m'), role: 'system', content: [textBlock('You are a test.')], source: { kind: 'system' } } }, { surfaceOp: 'append' }))
+  const a = b.user('A')
+  const a1 = b.assistant(1, 1, 'A1')
+  b.stepEnd(1, 1)
+  b.turnEnd(1)
+  b.turnStart(2)
+  b.stepStart(2, 1)
+  const c = b.user('C')
+  const c1 = b.assistant(2, 1, 'C1')
+  b.stepEnd(2, 1)
+  b.turnEnd(2)
+  const editA = b.push(
+    b.next('user/message', { id: uid('m'), role: 'user', content: [textBlock('A edited')], source: { kind: 'user', editedBy: 'dsh-edit-turn' } }, { surfaceOp: { op: 'replace', startSeq: a.seq, endSeq: a.seq }, sourceEventSeqs: [a.seq] }),
+  )
+  const editC = b.push(
+    b.next('user/message', { id: uid('m'), role: 'user', content: [textBlock('C edited')], source: { kind: 'user', editedBy: 'dsh-edit-turn' } }, { surfaceOp: { op: 'replace', startSeq: c.seq, endSeq: c.seq }, sourceEventSeqs: [c.seq] }),
+  )
+  return { events: b.events, seqs: { a, a1, c, c1, editA, editC } }
+}
+
+test('a rerun over edited prompts replays the edited prompt before its reply', () => {
+  const { events, seqs } = editedPromptsLog()
+  const surface = P.foldSurface(events).nodes
+  const plan = P.planRerun(events, surface, { seq: seqs.a1.seq })
+  // The window opens on the edit carrier standing in the prompt slot and runs to
+  // the last surface node; its endpoints must both BE surface nodes (the host
+  // resolves the range by surface position).
+  assert.equal(plan.startSeq, seqs.editA.seq)
+  assert.equal(plan.endSeq, seqs.c1.seq)
+  assert.equal(surface.includes(plan.startSeq), true)
+  assert.equal(surface.includes(plan.endSeq), true)
+  assert.deepEqual(plan.shadowed, [seqs.editA.seq, seqs.a1.seq, seqs.editC.seq, seqs.c1.seq])
+
+  const writes = P.buildReplayWrites(events, plan, 7, 'rerun-1', 100, false)
+  const types = writes.map((write) => write.type)
+  const userCopy = writes.find((write) => write.type === 'user/message')
+  const replyCopy = writes.find((write) => write.type === 'assistant/message')
+  assert.equal(userCopy.data.content[0].text, 'C edited', 'the edited prompt is replayed')
+  assert.equal(userCopy.data.source.originalSeq, seqs.editC.seq, 'the copy cites the carrier it stands for')
+  assert.equal(replyCopy.data.message.source.originalSeq, seqs.c1.seq)
+  assert.ok(
+    types.indexOf('user/message') < types.indexOf('assistant/message'),
+    'the edited prompt is copied before its reply (surface slot order, not log order)',
+  )
+  assert.equal(types[0], 'turn/start')
+  assert.equal(types[types.length - 1], 'turn/end')
+})
+
+test('a rerun retires the originals its carriers replaced, not just the carriers', () => {
+  const { events, seqs } = editedPromptsLog()
+  const surface = P.foldSurface(events).nodes
+  const plan = P.planRerun(events, surface, { seq: seqs.a1.seq })
+  const carrier = P.buildShadowWrites(plan, 'rerun-1', 'prompt-1', true)[0]
+  const refs = new Set(carrier.sourceEventSeqs)
+  // Both replaced originals travel with the shadow list: the edit plugin's client
+  // would otherwise re-render the old prompt row while the carrier bubble is retired.
+  assert.equal(refs.has(seqs.a.seq), true, 'the original prompt is retired')
+  assert.equal(refs.has(seqs.c.seq), true, 'the later turn original is retired too')
+  // Every surface node the range covers is listed (the host's own rule).
+  const startIdx = surface.indexOf(carrier.surfaceOp.startSeq)
+  const endIdx = surface.indexOf(carrier.surfaceOp.endSeq)
+  for (const seq of surface.slice(startIdx, endIdx + 1)) assert.equal(refs.has(seq), true)
+})
