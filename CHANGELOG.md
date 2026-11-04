@@ -4,6 +4,11 @@
 
 ## 中文
 
+**0.2.8** —— 设置卡片同时出现在包自己的页面上。
+
+- 新增 `plugins.bundle.config` 注册（key 是裸包名）：`#/panel/plugins/dsh-rerun-turn` 直接能看到重跑设置，不再只能从 `…/dsh-rerun-turn/dsh-rerun-turn` 那一层进去。
+- 与 `plugins.row.config` 注册的是同一个组件，设置只有一份来源。
+
 **0.2.7** —— 修：重跑窗口、重放顺序、生成期间的那一帧。
 
 - **遮蔽窗口按表面节点算**：区间端点取自表面节点（宿主按 `indexOf` 解析，裸 seq 会被拒），`sourceEventSeqs` 与区间出自同一个集合——此前两者不一致，宿主会把区间外的节点当悬空引用，表现为「下一轮的输入消失」。
