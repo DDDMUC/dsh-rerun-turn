@@ -4,6 +4,11 @@
 
 ## 中文
 
+**0.2.9** —— 设置卡片只挂在包自己的页面上。
+
+- 去掉 `plugins.row.config` 注册：不再给行加「配置」按钮，重跑设置只出现在 `#/panel/plugins/dsh-rerun-turn`。
+- 同一张卡、同一个组件，只有一个入口。
+
 **0.2.8** —— 设置卡片同时出现在包自己的页面上。
 
 - 新增 `plugins.bundle.config` 注册（key 是裸包名）：`#/panel/plugins/dsh-rerun-turn` 直接能看到重跑设置，不再只能从 `…/dsh-rerun-turn/dsh-rerun-turn` 那一层进去。

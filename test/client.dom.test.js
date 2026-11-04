@@ -618,12 +618,12 @@ test('the confirmation is the platform modal, without the A B C1 D E F G line', 
   assert.deepEqual(modal.props.footer.props.children.map((button) => button.props.variant), ['ghost', 'primary'])
 })
 
-// --- the plugin page: "ask before rerunning" (slot plugins.row.config) ---------
+// --- the plugin page: "ask before rerunning" (slot plugins.bundle.config) ---------
 
 test('the plugin page registers a row.config entry under the bundle#row key', () => {
-  const entry = byName('plugins.row.config')
-  assert.ok(entry, 'the settings page must register a plugins.row.config entry')
-  assert.equal(entry.config.key, 'dsh-rerun-turn#dsh-rerun-turn', 'the key is <bundle>#<row id>')
+  const entry = byName('plugins.bundle.config')
+  assert.ok(entry, 'the settings page must register a plugins.bundle.config entry')
+  assert.equal(entry.config.key, 'dsh-rerun-turn', 'the key is <bundle>#<row id>')
 })
 
 /** Every element in a React tree, depth first. */
@@ -656,7 +656,7 @@ function classedIn(tree, className) {
 
 test('the row.config summary follows the checkbox', () => {
   storage.clear()
-  const entry = byName('plugins.row.config')
+  const entry = byName('plugins.bundle.config')
   const t = (key) => key
   assert.equal(entry.entry({ view: 'summary', t }), 'config.summary.auto', 'the shipped default follows the host config (off)')
   const tree = entry.entry({ view: 'page', t })
@@ -674,7 +674,7 @@ test('the settings card defines the two words the host does not', () => {
   // should show after the plugins' work). Without the definition the card is
   // unreadable three months later, so the card carries it.
   const handle = applyInstance(freshInstance().instance)
-  const entry = byName('plugins.row.config')
+  const entry = byName('plugins.bundle.config')
   const page = entry.entry({ view: 'page', t: (key) => key })
   const terms = classedIn(page, 'dsrr-terms')
   assert.ok(terms, 'the card carries the convention block')
@@ -769,7 +769,7 @@ function applyInstance(instance) {
   })
   return {
     overlay: registrations.find((item) => item.config.name === 'conversation.input.overlay'),
-    config: registrations.find((item) => item.config.name === 'plugins.row.config'),
+    config: registrations.find((item) => item.config.name === 'plugins.bundle.config'),
     registrations,
     dictionaries,
     /** Cordis disposes a fiber's effects in reverse registration order. */
@@ -968,7 +968,7 @@ test('the resend setting decides what an unanswered turn addresses: the first A 
 
   // inplace: the Q addresses the visible turn it belongs to. Switched through
   // the settings card, exactly as the page does it.
-  const configEntry = byName('plugins.row.config')
+  const configEntry = byName('plugins.bundle.config')
   const page = configEntry.entry({ view: 'page', t: (key) => key })
   const select = selectOf(page)
   assert.deepEqual(select.props.children.map((option) => option.props.value), ['below', 'inplace'])
