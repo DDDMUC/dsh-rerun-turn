@@ -4,6 +4,15 @@
 
 ## 中文
 
+**0.3.1** —— 宿主不再被 `/state` 的重复解码拖垮。
+
+- `/state` 先问宿主要内存快照（`session.snapshotEvents()`），只有冷会话才走
+  `readSession`（那条路会把整份日志重新解码并逐条深冻结，20MB 的日志要数秒）。
+- 派生结果按**事件数组引用**缓存：日志没动就直接返回上次的派生结果，一次计算都不做。
+  （不用「事件数 + 末 seq」做键 —— 那个会撞，不同会话可能拿到同一份结果。）
+- 同一会话的并发请求单飞，不做各算各的。
+- 前端 `document.hidden` 时跳过轮询。
+
 **0.3.0** —— 动作入口尺寸与先渲染。
 
 - 重跑图标改为 `calc(16px + var(--dsh-content-font-delta))`，按钮 `28px + delta`，与宿主动作条同尺寸。
@@ -46,6 +55,16 @@
 验证：单测 90、契约 29、客户端 7 全绿；真实日志副本上「不闪回 / 后续轮次仍在 / 区间与 refs 一致 / 九项校验通过」。
 
 ## English
+
+**0.3.1** —— the host is no longer hammered by repeated `/state` decodes.
+
+- `/state` reads the host's in-memory snapshot first (`session.snapshotEvents()`);
+  `readSession` (a full re-decode plus deep freeze of every event) is only for cold
+  sessions.
+- Derived results are cached by **events array identity**; an unchanged log returns
+  the previous result without recomputing. (A `length:lastSeq` fingerprint collides.)
+- Concurrent requests for one session share a single computation.
+- The client polls nothing while `document.hidden`.
 
 **0.2.7** — fix: the rerun window, the replay order, and the one frame during generation.
 
